@@ -1679,3 +1679,22 @@ code {
 #header-post #actions {
   direction: ltr !important;
 }
+body {
+  border-top: 0 !important;
+  padding-top: 0 !important;
+}
+#header {
+  border-top: 0 !important;
+  background-color: transparent !important;
+  margin-top: 0 !important;
+  padding-top: 2rem;
+}
+body:before,
+body:after,
+#header:before,
+#header:after {
+  display: none !important;
+  height: 0 !important;
+  border: none !important;
+  content: "" !important;
+}
