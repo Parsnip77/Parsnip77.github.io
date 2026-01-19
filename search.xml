@@ -11,6 +11,20 @@
         <content type="html"><![CDATA[<p>Test. ABCDE. 12345.</p><h2 id="Title1"><a href="#Title1" class="headerlink" title="Title1"></a>Title1</h2><h3 id="Title2"><a href="#Title2" class="headerlink" title="Title2"></a>Title2</h3><p>中文测试。 一二三四。</p><p>LaTeX testing $ e^{i \pi} + 1 = 0 $</p><script type="math/tex; mode=display">\int _{\Omega} \left( \sum_{|\alpha| < m } \left| \partial^\alpha  u \right|^2 \right) ^ {\frac{1}{2}} \leqslant C \int _{\Omega} \left( \sum_{|\alpha| = m } \left| \partial^\alpha  u \right|^2 \right) ^ {\frac{1}{2}}</script><hr><figure class="highlight python"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">import</span> math</span><br><span class="line">a = <span class="number">100</span> ** <span class="number">2</span></span><br><span class="line">b = math.pi</span><br><span class="line"><span class="built_in">print</span>(a*b)</span><br></pre></td></tr></table></figure>]]></content>
       
       
+      <categories>
+          
+          <category> uncategorized </category>
+          
+      </categories>
+      
+      
+        <tags>
+            
+            <tag> test </tag>
+            
+            <tag> random </tag>
+            
+        </tags>
       
     </entry>
     
