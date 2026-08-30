@@ -3,7 +3,7 @@
 <feed xmlns="http://www.w3.org/2005/Atom">
     <id>https://leanderc.com//es/</id>
     <title>Leander's Blog</title>
-    <updated>2026-08-30T09:15:24.502Z</updated>
+    <updated>2026-08-30T10:05:41.561Z</updated>
     <generator>Leander's Blog with Astro and Feed for Node.js</generator>
     <author>
         <name>Leander Chan</name>
