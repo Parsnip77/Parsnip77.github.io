@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?xml-stylesheet href="/feeds/atom-style.xsl" type="text/xsl"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+    <id>https://parsnip77.github.io//de/</id>
+    <title>Leander's Blog</title>
+    <updated>2026-08-30T02:29:42.098Z</updated>
+    <generator>Leander's Blog with Astro and Feed for Node.js</generator>
+    <author>
+        <name>Leander Chan</name>
+        <uri>https://parsnip77.github.io//</uri>
+    </author>
+    <link rel="alternate" href="https://parsnip77.github.io//de/"/>
+    <link rel="self" href="https://parsnip77.github.io/de/atom.xml"/>
+    <subtitle>Leander's Blog | Journal, Essay &amp; Research</subtitle>
+    <rights>Copyright © 2026 Leander Chan</rights>
+</feed>

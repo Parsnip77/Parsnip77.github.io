@@ -1,0 +1,1 @@
+import{b as r}from"./graph.QXD3xry3.js";var e=4;function a(a){return r(a,e)}export{a as c};

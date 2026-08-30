@@ -1,0 +1,1 @@
+import{_ as i}from"./mermaid.core.CI4b6q1b.js";function t(t,c){t.accDescr&&c.setAccDescription?.(t.accDescr),t.accTitle&&c.setAccTitle?.(t.accTitle),t.title&&c.setDiagramTitle?.(t.title)}i(t,"populateCommonDb");export{t as p};
