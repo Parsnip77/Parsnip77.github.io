@@ -1,15 +1,588 @@
 <?xml version="1.0" encoding="utf-8"?>
 <?xml-stylesheet href="/feeds/rss-style.xsl" type="text/xsl"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom">
     <channel>
         <title>Leander's Blog</title>
         <link>https://parsnip77.github.io//</link>
         <description>Leander's Blog | Journal, Essay &amp; Research</description>
-        <lastBuildDate>Sun, 30 Aug 2026 02:40:10 GMT</lastBuildDate>
+        <lastBuildDate>Sun, 30 Aug 2026 02:57:37 GMT</lastBuildDate>
         <docs>https://validator.w3.org/feed/docs/rss2.html</docs>
         <generator>Leander's Blog with Astro and Feed for Node.js</generator>
         <language>en</language>
         <copyright>Copyright © 2026 Leander Chan</copyright>
         <atom:link href="https://parsnip77.github.io/rss.xml" rel="self" type="application/rss+xml"/>
+        <item>
+            <title><![CDATA[Spectral Methods for Graph Diffusion: From Laplacians to Fast Solvers]]></title>
+            <link>https://parsnip77.github.io//posts/spectral-graph-diffusion/</link>
+            <guid isPermaLink="false">https://parsnip77.github.io//posts/spectral-graph-diffusion/</guid>
+            <pubDate>Sun, 30 Aug 2026 02:00:00 GMT</pubDate>
+            <description><![CDATA[A technical study of graph diffusion, spectral filtering, stability, and practical implementations in Python, TypeScript, Rust, SQL, and shell workflows.]]></description>
+            <content:encoded><![CDATA[<h2>Abstract</h2>
+<p>Diffusion on a graph is a small mathematical idea with an unusually wide computational reach. It appears in ranking, denoising, semi-supervised learning, consensus dynamics, heat-kernel signatures, and the propagation layers of graph neural networks. This paper develops the subject from the combinatorial Laplacian to polynomial and Krylov approximations, with an emphasis on the boundary between a clean spectral formula and an implementation that remains stable on a large sparse graph.</p>
+<p>The central object is the heat operator</p>
+<p>$$
+H_t = \exp(-tL), \qquad t \ge 0,
+$$</p>
+<p>where $L$ is a graph Laplacian. The exact eigendecomposition makes the geometry transparent; fast solvers replace it with local recurrences, sparse matrix products, and controlled approximation error.</p>
+<p>:::note[Notation]
+Vectors are columns. For a real symmetric matrix $A$, its ordered eigenvalues are $\lambda_1(A) \le \cdots \le \lambda_n(A)$. The Euclidean and operator norms are both written $\lVert\cdot\rVert_2$; context distinguishes them.
+:::</p>
+<h2>1. Graphs, Signals, and Laplacians</h2>
+<p>Let $G=(V,E,w)$ be an undirected weighted graph with $n=|V|$. Its adjacency matrix $A\in\mathbb{R}^{n\times n}$ satisfies $A_{ij}=w_{ij}=w_{ji}\ge 0$, and its degree matrix is</p>
+<p>$$
+D = \operatorname{diag}(d_1,\ldots,d_n),
+\qquad
+d_i = \sum_{j=1}^{n} A_{ij}.
+$$</p>
+<p>The <strong>combinatorial Laplacian</strong>, the <strong>symmetric normalized Laplacian</strong>, and the <strong>random-walk Laplacian</strong> are respectively</p>
+<p>$$
+L = D-A,
+\qquad
+L_{\mathrm{sym}} = I-D^{-1/2}AD^{-1/2},
+\qquad
+L_{\mathrm{rw}} = I-D^{-1}A.
+$$</p>
+<p>For isolated vertices, inverse degree factors are defined as zero. A graph signal is a vector $x\in\mathbb{R}^n$ whose coordinate $x_i$ is attached to vertex $i$.</p>
+<h3>1.1 The quadratic form</h3>
+<p>The identity</p>
+<p>$$
+x^\top Lx
+= \frac12\sum_{i,j=1}^{n}A_{ij}(x_i-x_j)^2
+= \sum_{{i,j}\in E}w_{ij}(x_i-x_j)^2
+$$</p>
+<p>immediately proves $L\succeq 0$. It also explains why low-frequency signals are smooth: they vary little across heavily weighted edges.</p>
+<p>:::important[Energy principle]
+The Laplacian is not merely a matrix encoding adjacency. Its quadratic form assigns energy to disagreement. Diffusion decreases that energy while preserving mass on each connected component.
+:::</p>
+<p>If $G$ has $c$ connected components, then</p>
+<p>$$
+\dim\ker L = c,
+$$</p>
+<p>and the indicator vectors of the components span the null space. For a connected graph, $\lambda_1=0$ is simple and the <strong>spectral gap</strong> $\lambda_2&gt;0$ controls the slowest nonconstant mode.</p>
+<h3>1.2 A small example</h3>
+<p>For the path graph on four vertices,</p>
+<p>$$
+L=
+\begin{bmatrix}
+1 &amp; -1 &amp; 0 &amp; 0 \
+-1 &amp; 2 &amp; -1 &amp; 0 \
+0 &amp; -1 &amp; 2 &amp; -1 \
+0 &amp; 0 &amp; -1 &amp; 1
+\end{bmatrix}.
+$$</p>
+<p>Applying $L$ to $x=(1,1,0,0)^\top$ yields $(0,1,-1,0)^\top$: only the boundary across which the signal changes contributes to the discrete derivative.</p>
+<h2>2. Heat Flow and Spectral Filtering</h2>
+<p>The continuous-time diffusion equation is</p>
+<p>$$
+\frac{d}{dt}x(t)=-Lx(t),
+\qquad x(0)=x_0.
+$$</p>
+<p>Because $L$ is symmetric, it admits $L=U\Lambda U^\top$, where $U^\top U=I$ and $\Lambda=\operatorname{diag}(\lambda_1,\ldots,\lambda_n)$. Therefore</p>
+<p>$$
+x(t)=e^{-tL}x_0
+=Ue^{-t\Lambda}U^\top x_0
+=\sum_{k=1}^{n}e^{-t\lambda_k}\langle u_k,x_0\rangle u_k.
+$$</p>
+<p>Each eigenvector $u_k$ is a graph Fourier mode, and $e^{-t\lambda_k}$ is a low-pass multiplier. Large eigenvalues decay rapidly; the null-space component remains.</p>
+<p>:::tip[Sanity checks for an implementation]
+For an undirected graph, a computed heat operator should be symmetric, positive definite for finite $t$, contractive in the $2$-norm, and mass-preserving: $H_t\mathbf{1}=\mathbf{1}$.
+:::</p>
+<h3>2.1 Long-time behavior</h3>
+<p>On a connected graph,</p>
+<p>$$
+\lim_{t\to\infty}e^{-tL}
+=u_1u_1^\top
+=\frac{1}{n}\mathbf{1}\mathbf{1}^\top.
+$$</p>
+<p>Moreover, for every $x_0$ orthogonal to $\mathbf{1}$,</p>
+<p>$$
+\lVert e^{-tL}x_0\rVert_2
+\le e^{-t\lambda_2}\lVert x_0\rVert_2.
+$$</p>
+<p>This inequality makes the spectral gap operational: to reduce the nonconstant component by a factor $\varepsilon$, it is enough that</p>
+<p>$$
+t \ge \frac{1}{\lambda_2}\log\frac{1}{\varepsilon}.
+$$</p>
+<h3>2.2 Resolvents and regularization</h3>
+<p>The heat kernel is one member of a larger family of spectral filters. Tikhonov smoothing solves</p>
+<p>$$
+x_\mu
+=\arg\min_x\left{
+\frac12\lVert x-y\rVert_2^2
++\frac{\mu}{2}x^\top Lx
+\right},
+$$</p>
+<p>so the optimality condition gives</p>
+<p>$$
+(I+\mu L)x_\mu=y,
+\qquad
+x_\mu=(I+\mu L)^{-1}y.
+$$</p>
+<p>In the graph Fourier basis, the multiplier is $(1+\mu\lambda)^{-1}$. Heat diffusion suppresses high frequencies exponentially; the resolvent suppresses them rationally.</p>
+<table>
+<thead>
+<tr>
+<th>Filter</th>
+<th>Spectral response $g(\lambda)$</th>
+<th>Typical use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Heat</td>
+<td>$e^{-t\lambda}$</td>
+<td>Multiscale smoothing</td>
+</tr>
+<tr>
+<td>Resolvent</td>
+<td>$(1+\mu\lambda)^{-1}$</td>
+<td>Regularized estimation</td>
+</tr>
+<tr>
+<td>Lazy random walk</td>
+<td>$(1-\alpha\lambda)^k$</td>
+<td>Local propagation</td>
+</tr>
+<tr>
+<td>Ideal cutoff</td>
+<td>$\mathbf{1}_{\lambda\le\tau}$</td>
+<td>Analysis, rarely direct computation</td>
+</tr>
+</tbody>
+</table>
+<h2>3. Discretization and Stability</h2>
+<p>The explicit Euler scheme with step size $h$ is</p>
+<p>$$
+x_{k+1}=(I-hL)x_k.
+$$</p>
+<p>Stability requires $|1-h\lambda_i|\le 1$ for every $i$, hence</p>
+<p>$$
+0\le h\le\frac{2}{\lambda_{\max}(L)}.
+$$</p>
+<p>If one additionally wants $I-hL$ to be entrywise nonnegative for the combinatorial Laplacian, the stricter sufficient condition $h\le 1/d_{\max}$ is natural.</p>
+<p>:::warning[The innocent-looking step size]
+Choosing $h$ from wall-clock convenience rather than the spectrum can create oscillation or divergence. On heterogeneous graphs, a step that is safe for the average degree may be unsafe for a hub.
+:::</p>
+<p>The implicit Euler scheme,</p>
+<p>$$
+(I+hL)x_{k+1}=x_k,
+$$</p>
+<p>is unconditionally stable but requires a linear solve. Crank–Nicolson uses</p>
+<p>$$
+\left(I+\frac{h}{2}L\right)x_{k+1}
+=\left(I-\frac{h}{2}L\right)x_k,
+$$</p>
+<p>and is second-order accurate, though not necessarily monotone for large $h$.</p>
+<h3>3.1 Error decomposition</h3>
+<p>For a numerical approximation $\widetilde{x}(t)$, it is useful to separate</p>
+<p>$$
+\lVert \widetilde{x}(t)-e^{-tL}x_0\rVert_2
+\le
+\underbrace{\lVert \widetilde{x}(t)-p_m(L)x_0\rVert_2}<em>{\text{arithmetic/solver error}}
++
+\underbrace{\lVert p_m(L)-e^{-tL}\rVert_2\lVert x_0\rVert_2}</em>{\text{approximation error}}.
+$$</p>
+<p>The separation prevents a common debugging mistake: increasing floating-point precision cannot repair a polynomial of insufficient degree.</p>
+<h2>4. Fast Approximation Without Eigenvectors</h2>
+<p>A dense eigendecomposition costs $O(n^3)$ time and $O(n^2)$ memory. For a sparse graph with $m=|E|$, the relevant primitive is instead a sparse matrix–vector product, which costs $O(m+n)$.</p>
+<h3>4.1 Chebyshev approximation</h3>
+<p>Suppose the spectrum of $L$ lies in $[0,\lambda_{\max}]$. Map it to $[-1,1]$ via</p>
+<p>$$
+\widetilde{L}=\frac{2}{\lambda_{\max}}L-I.
+$$</p>
+<p>Approximate $e^{-tL}$ by</p>
+<p>$$
+p_K(L)=\sum_{k=0}^{K}c_kT_k(\widetilde{L}),
+$$</p>
+<p>where $T_0(z)=1$, $T_1(z)=z$, and</p>
+<p>$$
+T_{k+1}(z)=2zT_k(z)-T_{k-1}(z).
+$$</p>
+<p>Only three work vectors are needed. The coefficients may be computed by a discrete cosine transform of the target function on Chebyshev nodes.</p>
+<pre><code>from __future__ import annotations
+
+import numpy as np
+from scipy.sparse import csr_matrix, eye
+
+
+def chebyshev_apply(
+    laplacian: csr_matrix,
+    signal: np.ndarray,
+    coefficients: np.ndarray,
+    lambda_max: float,
+) -&gt; np.ndarray:
+    """Apply a Chebyshev polynomial to a sparse graph signal."""
+    n = laplacian.shape[0]
+    scaled = (2.0 / lambda_max) * laplacian - eye(n, format="csr")
+
+    t0 = signal.copy()
+    result = coefficients[0] * t0
+    if len(coefficients) == 1:
+        return result
+
+    t1 = scaled @ signal
+    result += coefficients[1] * t1
+
+    for coefficient in coefficients[2:]:
+        t2 = 2.0 * (scaled @ t1) - t0
+        result += coefficient * t2
+        t0, t1 = t1, t2
+
+    return result
+</code></pre>
+<p>:::caution[Do not guess the spectral interval]
+If the estimate of $\lambda_{\max}$ is too small, part of the spectrum is mapped outside $[-1,1]$, where Chebyshev recurrences may grow rapidly. A safe upper bound is better than an optimistic one.
+:::</p>
+<h3>4.2 Krylov projection</h3>
+<p>The $r$-dimensional Krylov space is</p>
+<p>$$
+\mathcal{K}_r(L,x_0)
+=\operatorname{span}{x_0,Lx_0,\ldots,L^{r-1}x_0}.
+$$</p>
+<p>Lanczos iteration constructs an orthonormal basis $Q_r$ and a symmetric tridiagonal matrix $T_r=Q_r^\top LQ_r$. Then</p>
+<p>$$
+e^{-tL}x_0
+\approx
+\lVert x_0\rVert_2 Q_r e^{-tT_r}e_1.
+$$</p>
+<p>The expensive computation remains sparse; only the small $r\times r$ exponential is dense.</p>
+<p>:::fold[Pseudocode for a Lanczos heat step]</p>
+<pre><code>q₁ ← x / ‖x‖₂
+q₀ ← 0, β₀ ← 0
+for j = 1, …, r:
+    z ← Lqⱼ − βⱼ₋₁qⱼ₋₁
+    αⱼ ← qⱼᵀz
+    z ← z − αⱼqⱼ
+    z ← reorthogonalize(z, q₁, …, qⱼ)
+    βⱼ ← ‖z‖₂
+    qⱼ₊₁ ← z / βⱼ
+return ‖x‖₂ Qᵣ exp(−tTᵣ)e₁
+</code></pre>
+<p>:::</p>
+<h2>5. An Implementation Pipeline</h2>
+<p>The computational dependencies can be summarized as follows:</p>
+<pre><code>flowchart LR
+    E[Edge list] --&gt; A[Sparse adjacency]
+    A --&gt; D[Degrees]
+    A --&gt; L[Laplacian]
+    D --&gt; L
+    L --&gt; B[Spectral bound]
+    B --&gt; C[Chebyshev coefficients]
+    L --&gt; R[Sparse recurrence]
+    C --&gt; R
+    X[Input signal] --&gt; R
+    R --&gt; Y[Diffused signal]
+    Y --&gt; V[Invariant checks]
+</code></pre>
+<h3>5.1 TypeScript reference types</h3>
+<pre><code>type VertexId = number
+
+interface WeightedEdge {
+  readonly source: VertexId
+  readonly target: VertexId
+  readonly weight: number
+}
+
+interface CSRMatrix {
+  readonly rows: number
+  readonly rowPtr: Uint32Array
+  readonly columnIndex: Uint32Array
+  readonly values: Float64Array
+}
+
+export function assertFiniteSignal(x: Float64Array): void {
+  for (const [index, value] of x.entries()) {
+    if (!Number.isFinite(value))
+      throw new RangeError(`signal[${index}] is not finite: ${value}`)
+  }
+}
+</code></pre>
+<h3>5.2 Rust sparse multiplication</h3>
+<pre><code>#[derive(Debug)]
+pub struct CsrMatrix {
+    pub rows: usize,
+    pub row_ptr: Vec&lt;usize&gt;,
+    pub col_idx: Vec&lt;usize&gt;,
+    pub values: Vec&lt;f64&gt;,
+}
+
+impl CsrMatrix {
+    pub fn mul_vec(&amp;self, x: &amp;[f64]) -&gt; Vec&lt;f64&gt; {
+        assert_eq!(x.len(), self.rows);
+        let mut y = vec![0.0; self.rows];
+
+        for row in 0..self.rows {
+            let range = self.row_ptr[row]..self.row_ptr[row + 1];
+            y[row] = range
+                .map(|p| self.values[p] * x[self.col_idx[p]])
+                .sum();
+        }
+        y
+    }
+}
+</code></pre>
+<h3>5.3 Storing weighted edges</h3>
+<pre><code>CREATE TABLE graph_edge (
+    graph_id     BIGINT           NOT NULL,
+    source_id    BIGINT           NOT NULL,
+    target_id    BIGINT           NOT NULL,
+    weight       DOUBLE PRECISION NOT NULL CHECK (weight &gt;= 0),
+    PRIMARY KEY (graph_id, source_id, target_id),
+    CHECK (source_id &lt; target_id)
+);
+
+CREATE INDEX graph_edge_target_idx
+    ON graph_edge (graph_id, target_id);
+</code></pre>
+<h3>5.4 Reproducible command-line run</h3>
+<pre><code>set -euo pipefail
+
+python -m graphdiff.prepare \
+  --edges data/edges.parquet \
+  --output build/graph.npz
+
+python -m graphdiff.solve \
+  --graph build/graph.npz \
+  --time 2.5 \
+  --degree 48 \
+  --seed 20260830
+</code></pre>
+<p>Configuration can remain plain and reviewable:</p>
+<pre><code>operator: combinatorial-laplacian
+solver:
+  method: chebyshev
+  degree: 48
+  spectral_bound: power-iteration
+validation:
+  mass_tolerance: 1.0e-10
+  energy_tolerance: 1.0e-12
+</code></pre>
+<h2>6. Testing Mathematical Invariants</h2>
+<p>Numerical tests should express mathematical facts, not only example outputs.</p>
+<pre><code>def test_heat_step_preserves_mass(heat_step, signal):
+    result = heat_step(signal, time=0.75)
+    assert abs(result.sum() - signal.sum()) &lt; 1e-10
+
+
+def test_heat_step_does_not_increase_laplacian_energy(
+    heat_step, laplacian, signal
+):
+    before = signal @ (laplacian @ signal)
+    result = heat_step(signal, time=0.75)
+    after = result @ (laplacian @ result)
+    assert after &lt;= before + 1e-12
+</code></pre>
+<p>A compact checklist is useful during optimization:</p>
+<ul>
+<li>[x] symmetry or documented directed-graph semantics;</li>
+<li>[x] nonnegative weights and explicit isolated-vertex policy;</li>
+<li>[x] mass preservation within tolerance;</li>
+<li>[x] nonincreasing Dirichlet energy;</li>
+<li>[ ] benchmark results separated from correctness tests;</li>
+<li>[ ] approximation degree tested across multiple spectral gaps.</li>
+</ul>
+<p>:::fold[Why a component-wise test is not enough]
+A solver can produce plausible values on a few hand-written graphs while violating a structural invariant on larger inputs. Property-based tests can generate nonnegative symmetric adjacency matrices, form their Laplacians, and test conservation and contraction over many signals and time scales.
+:::</p>
+<h2>7. Complexity and Method Selection</h2>
+<p>Let $m$ be the number of undirected edges, $K$ the polynomial degree, $r$ the Krylov dimension, and $s$ the number of right-hand sides.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Time</th>
+<th>Extra memory</th>
+<th>Best regime</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Dense eigendecomposition</td>
+<td>$O(n^3+sn^2)$</td>
+<td>$O(n^2)$</td>
+<td>Small graph, many filters</td>
+</tr>
+<tr>
+<td>Explicit Euler</td>
+<td>$O(km)$</td>
+<td>$O(n)$</td>
+<td>Simple local steps, strict stability control</td>
+</tr>
+<tr>
+<td>Chebyshev</td>
+<td>$O(Km)$</td>
+<td>$O(n)$</td>
+<td>Known spectral interval, many similar signals</td>
+</tr>
+<tr>
+<td>Lanczos/Krylov</td>
+<td>$O(rm+r^2n+r^3)$</td>
+<td>$O(rn)$</td>
+<td>High accuracy for a few signals</td>
+</tr>
+<tr>
+<td>Implicit solve</td>
+<td>Solver-dependent</td>
+<td>Solver-dependent</td>
+<td>Stiff problems, reusable preconditioner</td>
+</tr>
+</tbody>
+</table>
+<p>The asymptotic table is not a verdict. Cache locality, graph partitioning, coefficient reuse, accelerator transfer, and stopping criteria can dominate the observed runtime.</p>
+<h2>8. Conclusion</h2>
+<p>Spectral notation gives graph diffusion its conceptual simplicity:</p>
+<p>$$
+g(L)x=Ug(\Lambda)U^\top x.
+$$</p>
+<p>Sparse computation gives it scale. The art is to preserve the meaning of the spectral expression while replacing global eigenvectors with recurrences that can be audited, bounded, and tested. Chebyshev methods exploit a spectral interval; Krylov methods adapt a local subspace to the signal; implicit methods exchange unconditional stability for linear solves.</p>
+<p>The broader lesson extends beyond diffusion. Whenever a matrix function is easy to define but expensive to form, the right computational object is often not the matrix $g(L)$ itself, but the action $g(L)x$ together with invariants that certify the action remains faithful to the mathematics.</p>
+<blockquote>
+<p>Compute the action, preserve the invariant, and make the approximation error a first-class object.</p>
+</blockquote>
+<p>[AI 生成｜仅用于测试]</p>
+]]></content:encoded>
+            <author>Leander Chan</author>
+        </item>
+        <item>
+            <title><![CDATA[Attention, Finitude, and the Shape of a Life]]></title>
+            <link>https://parsnip77.github.io//posts/attention-and-finitude/</link>
+            <guid isPermaLink="false">https://parsnip77.github.io//posts/attention-and-finitude/</guid>
+            <pubDate>Sun, 30 Aug 2026 01:00:00 GMT</pubDate>
+            <description><![CDATA[A philosophical essay on attention as the practical form through which a finite life acquires shape, value, and responsibility.]]></description>
+            <content:encoded><![CDATA[<h2>Abstract</h2>
+<p>We often speak of attention as if it were a mental flashlight: a neutral instrument that can be pointed at one object and then another. This essay argues for a stronger claim. <strong>Attention is not merely something a person uses; it is one of the principal ways in which a person becomes someone.</strong> Because a human life is finite, every sustained act of noticing is also an exclusion, every promise of presence is also a refusal, and every cultivated habit of perception gradually gives experience a form.</p>
+<p>The argument proceeds in three stages. First, attention is described as a selective and embodied practice rather than a disembodied faculty. Second, finitude is shown to be the condition under which attention can have value. Third, responsibility is reinterpreted as an obligation not to notice everything, which is impossible, but to become answerable for one's patterns of noticing.</p>
+<p>:::note[Reading note]
+The words <em>attention</em>, <em>care</em>, and <em>presence</em> overlap in ordinary language, but they are not interchangeable here. Attention names a structure of selection; care names a mode of valuation; presence names the temporal discipline by which selection and valuation are maintained.
+:::</p>
+<hr />
+<h2>I. The Myth of Neutral Attention</h2>
+<p>The simplest picture of attention is optical. The world is already there, completely formed, while consciousness illuminates a small portion of it. What falls inside the beam becomes clear; what remains outside it is merely unseen. On this picture, attention changes the observer's access to the world but does not alter the significance of what is observed.</p>
+<p>This picture is useful, but incomplete. A beam of light does not learn how to shine. Human attention does. It is trained by language, institutions, appetite, fatigue, memory, fear, and expectation. The expert hears structure where the novice hears noise; the anxious traveler detects threat in an ambiguous gesture; the friend notices a hesitation that strangers overlook. Perception is never simply the arrival of data. It is already an achievement shaped by a history.</p>
+<blockquote>
+<p>We do not first receive a finished world and then decide what matters. In learning what to notice, we participate in the making of a world that can matter to us.</p>
+</blockquote>
+<p>This does not mean that reality is invented at will. A cliff remains dangerous whether or not it is noticed. It means, rather, that <em>salience</em> is relational. A fact can be present without being practically available, and something can be visible without becoming a reason for thought or action.</p>
+<h3>Attention as selection</h3>
+<p>Selection has at least four layers:</p>
+<ol>
+<li><strong>Sensory selection</strong> determines which signals emerge from a crowded field.</li>
+<li><strong>Conceptual selection</strong> determines under what description a signal is understood.</li>
+<li><strong>Affective selection</strong> determines what feels urgent, inviting, shameful, or negligible.</li>
+<li><strong>Practical selection</strong> determines what becomes a reason to act.</li>
+</ol>
+<p>These layers are distinguishable, not separable. A notification may be heard, recognized as a message, felt as urgent, and answered before the reader has explicitly chosen any of those steps. What appears to be a single <code>click</code> is the visible tip of an acquired disposition.</p>
+<p>:::tip[A small diagnostic]
+To discover the structure of an attentional habit, ask four questions: What appears first? Under what name does it appear? What feeling accompanies it? What action does it invite?
+:::</p>
+<h3>A typography interlude</h3>
+<p>The claim can be restated in several registers. In plain language: <em>we become accustomed to seeing some things before others</em>. In a stronger formulation: <strong>a hierarchy of attention becomes a hierarchy of reality-for-us</strong>. In compressed notation, let the experienced importance of an event be written as $S(e \mid h, c)$, where $h$ is a history of habits and $c$ is the present context. The event alone does not determine its salience.</p>
+<p>This paragraph deliberately mixes punctuation and scripts to test the page's rhythm: “double quotation marks,” ‘single quotation marks,’ an em dash—held without spaces—and an ellipsis…; naïveté, déjà vu, façade, Überlegung, Straße, corazón, razón, and the Greek term <em>prosochē</em> (προσοχή). Good typography should make the differences legible without making the page look restless.</p>
+<h2>II. Finitude as a Condition of Value</h2>
+<p>If attention were unlimited, it would lose much of its ethical and existential weight. A being capable of attending perfectly to every object, for all time, would not have to choose between the near and the distant, the urgent and the important, the promise already made and the possibility newly arrived. For finite beings, by contrast, attention is scarce in at least three senses:</p>
+<ul>
+<li>a day contains only so many waking hours;</li>
+<li>the mind can sustain only so many simultaneous demands;</li>
+<li>a life permits only so many projects to be carried far enough to acquire depth.</li>
+</ul>
+<p>Scarcity does not automatically create value, but it creates the field in which valuation becomes unavoidable. To attend is to spend something that cannot be spent twice in the same moment.</p>
+<p>:::important[The central claim]
+Finitude is not an unfortunate limit placed upon an otherwise complete power of attention. It is the background against which attention can count as devotion, neglect, fidelity, distraction, patience, or sacrifice.
+:::</p>
+<h3>The opportunity cost of presence</h3>
+<p>Economists describe opportunity cost as the value of the best alternative forgone. The concept becomes philosophically richer when applied to presence. Sitting with a grieving friend does not derive its meaning only from the words exchanged. It also means that, during that hour, one is not optimizing another task, cultivating another contact, or consuming another stream of information.</p>
+<table>
+<thead>
+<tr>
+<th>Mode of attention</th>
+<th>What it makes possible</th>
+<th>Characteristic danger</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Concentration</td>
+<td>Depth, continuity, difficult work</td>
+<td>Tunnel vision</td>
+</tr>
+<tr>
+<td>Vigilance</td>
+<td>Rapid response to change</td>
+<td>Chronic anxiety</td>
+</tr>
+<tr>
+<td>Receptivity</td>
+<td>Surprise, encounter, learning</td>
+<td>Passivity</td>
+</tr>
+<tr>
+<td>Care</td>
+<td>Sustained recognition of another</td>
+<td>Possessiveness</td>
+</tr>
+<tr>
+<td>Reflection</td>
+<td>Revision of one's own habits</td>
+<td>Endless deferral</td>
+</tr>
+</tbody>
+</table>
+<p>No row in this table is simply good or bad. A virtue of attention is not a maximum quantity but a fitting relation among object, duration, context, and cost.</p>
+<h3>Against the fantasy of perfect capture</h3>
+<p>Contemporary tools encourage a fantasy that nothing need be lost. We save the article, photograph the meal, record the lecture, archive the conversation, and promise to return later. The archive is useful, but it can disguise the difference between <em>retaining an object</em> and <em>having attended to it</em>.</p>
+<ul>
+<li>[x] A file can be stored.</li>
+<li>[x] A date can be indexed.</li>
+<li>[ ] A missed encounter can always be reconstructed.</li>
+<li>[ ] An unlived hour can be restored from metadata.</li>
+</ul>
+<p>The last two boxes remain empty. A record can become material for a future act of attention, but it cannot retroactively produce the quality of presence that was absent when the event occurred.</p>
+<p>:::warning[Archive is not memory]
+An archive reduces the cost of retrieval; it does not abolish interpretation, forgetting, or mortality. Treating storage as remembrance confuses possession with relation.
+:::</p>
+<h2>III. The Ethics of Noticing</h2>
+<p>An ethics of attention cannot command us to notice everything. Such a command would be incoherent: the attempt to obey it would destroy the selectivity that makes attention possible. The relevant question is instead: <strong>for which patterns of noticing can a person reasonably be held answerable?</strong></p>
+<p>Three criteria are helpful:</p>
+<ol>
+<li><strong>Revisability.</strong> Can the pattern change when evidence of distortion appears?</li>
+<li><strong>Reciprocity.</strong> Does it allow other people to appear as centers of experience rather than as functions in one's own story?</li>
+<li><strong>Proportion.</strong> Is the intensity of attention fitted to the importance and urgency of its object?</li>
+</ol>
+<h4>The moral importance of the background</h4>
+<p>Injustice often persists not because every participant explicitly endorses it, but because some suffering remains background noise. What is repeatedly omitted from reports, meetings, models, and stories becomes difficult to treat as real. This is why changing a vocabulary can sometimes change perception: a new term does not manufacture an experience, but it can make an experience recognizable and discussable.</p>
+<p>At the same time, visibility is not identical with justice. A person can be intensely visible and still be misunderstood. Public attention can flatten its object into a symbol, a case, or a spectacle. To demand recognition is therefore not always to demand more exposure; sometimes it is to demand a better description, a slower judgment, or the right not to be watched.</p>
+<p>:::caution[Visibility has an ambivalent politics]
+To be unseen can mean exclusion. To be constantly seen can mean surveillance. Ethical attention must distinguish recognition from exposure and curiosity from entitlement.
+:::</p>
+<h2>IV. Practices of Deliberate Attention</h2>
+<p>A philosophy becomes practical not when it supplies a universal checklist, but when it changes what can be noticed in ordinary conduct. The following exercises are modest by design:</p>
+<ul>
+<li>Read one difficult page twice before summarizing it.</li>
+<li>In conversation, wait long enough to discover whether a pause is empty or meaningful.</li>
+<li>Keep one hour in which no activity is converted into a record for later display.</li>
+<li>When an issue feels obvious, write down the strongest description available to someone who experiences it differently.</li>
+<li>At the end of a week, ask not only “What did I do?” but “What repeatedly captured me?”</li>
+</ul>
+<p>:::fold[An objection: does deliberate attention become self-surveillance?]
+Yes, it can. A person who monitors every fluctuation of focus may become less present, not more. The point of reflection is not to install an internal supervisor over every thought. It is to make durable patterns available for occasional revision. Habits should carry much of daily life; reflection should intervene when the habits systematically fail their objects.
+:::</p>
+<p>The practical ideal is therefore neither total control nor spontaneous innocence. It is a rhythm: immersion, interruption, examination, and return.</p>
+<p><img src="/icons/og-logo.png" alt="A magnetic field used as a visual metaphor for patterned attention" title="Attraction is structured, not neutral" /></p>
+<p>The image is only an analogy. A magnetic field does not choose its orientation, while a person can sometimes revise the forces that organize perception. Still, the analogy is useful: attention is rarely an isolated ray; it is more often a field with gradients, attractions, and regions of resistance.</p>
+<h2>V. Conclusion: A Life Has Edges</h2>
+<p>A life acquires shape because it has edges. There are conversations we cannot continue indefinitely, skills we will never master, languages we will not learn, injuries we will fail to notice in time, and possible selves we must leave unrealized. This is not an argument for resignation. It is an argument against treating limitation as a temporary technical defect.</p>
+<p>The ethical task is not to eliminate selection but to inhabit it lucidly. We should ask what our attention repeatedly enlarges, what it renders peripheral, whom it permits to speak, and what kinds of silence it mistakes for absence. The answers will never be final, because attention itself changes under the pressure of experience.</p>
+<blockquote>
+<p>The shape of a life is drawn less by the total number of things encountered than by the fidelity, distortion, and courage with which some of them were allowed to matter.</p>
+</blockquote>
+<p>In that sense, attention is both humble and world-making. It begins by admitting that we cannot receive everything. It becomes responsible when we understand that what we repeatedly receive—or refuse to receive—will help determine the world in which we and others must live.[^1]</p>
+<p>[^1]: For a related vocabulary of attention as discipline, see discussions of <em>prosochē</em> in ancient ethics and of “attention” in twentieth-century moral philosophy. The present argument is synthetic rather than historical.</p>
+<h3>Technical reference</h3>
+<p>The site used to present this essay is built with the following open-source project:</p>
+<p>::github{repo="withastro/astro"}</p>
+<p>[AI 生成｜仅用于测试]</p>
+]]></content:encoded>
+            <author>Leander Chan</author>
+        </item>
     </channel>
 </rss>

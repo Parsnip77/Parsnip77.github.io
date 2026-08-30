@@ -5,12 +5,585 @@
         <title>Leander's Blog</title>
         <link>https://parsnip77.github.io//zh/</link>
         <description>Leander's Blog | Journal, Essay &amp; Research</description>
-        <lastBuildDate>Sun, 30 Aug 2026 02:40:10 GMT</lastBuildDate>
+        <lastBuildDate>Sun, 30 Aug 2026 02:57:37 GMT</lastBuildDate>
         <docs>https://validator.w3.org/feed/docs/rss2.html</docs>
         <generator>Leander's Blog with Astro and Feed for Node.js</generator>
         <language>zh</language>
         <copyright>Copyright © 2026 Leander Chan</copyright>
         <atom:link href="https://parsnip77.github.io/zh/rss.xml" rel="self" type="application/rss+xml"/>
+        <item>
+            <title><![CDATA[图扩散的谱方法：从拉普拉斯算子到快速求解器]]></title>
+            <link>https://parsnip77.github.io//zh/posts/spectral-graph-diffusion/</link>
+            <guid isPermaLink="false">https://parsnip77.github.io//zh/posts/spectral-graph-diffusion/</guid>
+            <pubDate>Sun, 30 Aug 2026 02:00:00 GMT</pubDate>
+            <description><![CDATA[一篇讨论图扩散、谱滤波、稳定性，以及 Python、TypeScript、Rust、SQL 与命令行实现的数学和计算机科学测试论文。]]></description>
+            <content:encoded><![CDATA[<h2>摘要</h2>
+<p>图上的扩散是一个很小的数学观念，却具有异常广泛的计算用途。它出现在排序、去噪、半监督学习、共识动力学、热核特征，以及图神经网络的传播层中。本文从组合拉普拉斯算子出发，逐步讨论多项式近似和 Krylov 子空间近似，尤其关注一个边界：如何把干净的谱公式转化为在大型稀疏图上仍然稳定的实现。</p>
+<p>核心对象是热算子</p>
+<p>$$
+H_t = \exp(-tL), \qquad t \ge 0,
+$$</p>
+<p>其中 $L$ 是图拉普拉斯算子。精确特征分解能够清楚展示几何结构；快速求解器则用局部递推、稀疏矩阵乘法与可控近似误差取代它。</p>
+<p>:::note[记号]
+向量均为列向量。对于实对称矩阵 $A$，其有序特征值记作 $\lambda_1(A) \le \cdots \le \lambda_n(A)$。欧几里得范数与算子范数均写作 $\lVert\cdot\rVert_2$，由上下文区分。
+:::</p>
+<h2>一、图、信号与拉普拉斯算子</h2>
+<p>令 $G=(V,E,w)$ 为一个具有 $n=|V|$ 个顶点的无向加权图。它的邻接矩阵 $A\in\mathbb{R}^{n\times n}$ 满足 $A_{ij}=w_{ij}=w_{ji}\ge 0$，度矩阵为</p>
+<p>$$
+D = \operatorname{diag}(d_1,\ldots,d_n),
+\qquad
+d_i = \sum_{j=1}^{n} A_{ij}.
+$$</p>
+<p><strong>组合拉普拉斯算子</strong>、<strong>对称归一化拉普拉斯算子</strong>与<strong>随机游走拉普拉斯算子</strong>分别为</p>
+<p>$$
+L = D-A,
+\qquad
+L_{\mathrm{sym}} = I-D^{-1/2}AD^{-1/2},
+\qquad
+L_{\mathrm{rw}} = I-D^{-1}A.
+$$</p>
+<p>对于孤立顶点，逆度因子定义为零。图信号是一个向量 $x\in\mathbb{R}^n$，其坐标 $x_i$ 附着于顶点 $i$。</p>
+<h3>1.1 二次型</h3>
+<p>恒等式</p>
+<p>$$
+x^\top Lx
+= \frac12\sum_{i,j=1}^{n}A_{ij}(x_i-x_j)^2
+= \sum_{{i,j}\in E}w_{ij}(x_i-x_j)^2
+$$</p>
+<p>立刻证明了 $L\succeq 0$。它也解释了低频信号为什么是平滑的：这类信号在权重较大的边上变化很小。</p>
+<p>:::important[能量原理]
+拉普拉斯算子不只是一种编码邻接关系的矩阵。它的二次型为“不一致”赋予能量。扩散会降低这种能量，同时在每一个连通分量上保持总质量。
+:::</p>
+<p>如果 $G$ 有 $c$ 个连通分量，那么</p>
+<p>$$
+\dim\ker L = c,
+$$</p>
+<p>各连通分量的示性向量张成零空间。对于连通图，$\lambda_1=0$ 是单特征值，而<strong>谱间隙</strong> $\lambda_2&gt;0$ 控制最慢的非常数模态。</p>
+<h3>1.2 一个小例子</h3>
+<p>四个顶点的路径图具有拉普拉斯矩阵</p>
+<p>$$
+L=
+\begin{bmatrix}
+1 &amp; -1 &amp; 0 &amp; 0 \
+-1 &amp; 2 &amp; -1 &amp; 0 \
+0 &amp; -1 &amp; 2 &amp; -1 \
+0 &amp; 0 &amp; -1 &amp; 1
+\end{bmatrix}.
+$$</p>
+<p>把 $L$ 作用于 $x=(1,1,0,0)^\top$，得到 $(0,1,-1,0)^\top$：只有信号发生变化的边界对离散导数作出贡献。</p>
+<h2>二、热流与谱滤波</h2>
+<p>连续时间扩散方程为</p>
+<p>$$
+\frac{d}{dt}x(t)=-Lx(t),
+\qquad x(0)=x_0.
+$$</p>
+<p>由于 $L$ 对称，它具有分解 $L=U\Lambda U^\top$，其中 $U^\top U=I$，且 $\Lambda=\operatorname{diag}(\lambda_1,\ldots,\lambda_n)$。因此</p>
+<p>$$
+x(t)=e^{-tL}x_0
+=Ue^{-t\Lambda}U^\top x_0
+=\sum_{k=1}^{n}e^{-t\lambda_k}\langle u_k,x_0\rangle u_k.
+$$</p>
+<p>每个特征向量 $u_k$ 都是一个图 Fourier 模态，而 $e^{-t\lambda_k}$ 是低通乘子。较大的特征值快速衰减，零空间分量则保持不变。</p>
+<p>:::tip[实现中的合理性检查]
+对于无向图，计算得到的热算子应当对称，在有限 $t$ 上正定，在二范数下收缩，并且保持质量：$H_t\mathbf{1}=\mathbf{1}$。
+:::</p>
+<h3>2.1 长时间行为</h3>
+<p>在连通图上，</p>
+<p>$$
+\lim_{t\to\infty}e^{-tL}
+=u_1u_1^\top
+=\frac{1}{n}\mathbf{1}\mathbf{1}^\top.
+$$</p>
+<p>此外，对于每个与 $\mathbf{1}$ 正交的 $x_0$，</p>
+<p>$$
+\lVert e^{-tL}x_0\rVert_2
+\le e^{-t\lambda_2}\lVert x_0\rVert_2.
+$$</p>
+<p>这个不等式赋予谱间隙以可操作的意义：若要把非常数分量缩小到原来的 $\varepsilon$，只需满足</p>
+<p>$$
+t \ge \frac{1}{\lambda_2}\log\frac{1}{\varepsilon}.
+$$</p>
+<h3>2.2 预解式与正则化</h3>
+<p>热核是更大谱滤波器家族的一员。Tikhonov 平滑求解</p>
+<p>$$
+x_\mu
+=\arg\min_x\left{
+\frac12\lVert x-y\rVert_2^2
++\frac{\mu}{2}x^\top Lx
+\right},
+$$</p>
+<p>其最优性条件给出</p>
+<p>$$
+(I+\mu L)x_\mu=y,
+\qquad
+x_\mu=(I+\mu L)^{-1}y.
+$$</p>
+<p>在图 Fourier 基底中，对应乘子是 $(1+\mu\lambda)^{-1}$。热扩散以指数速度压制高频，预解式则以有理函数方式压制高频。</p>
+<table>
+<thead>
+<tr>
+<th>滤波器</th>
+<th>谱响应 $g(\lambda)$</th>
+<th>典型用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>热核</td>
+<td>$e^{-t\lambda}$</td>
+<td>多尺度平滑</td>
+</tr>
+<tr>
+<td>预解式</td>
+<td>$(1+\mu\lambda)^{-1}$</td>
+<td>正则化估计</td>
+</tr>
+<tr>
+<td>惰性随机游走</td>
+<td>$(1-\alpha\lambda)^k$</td>
+<td>局部传播</td>
+</tr>
+<tr>
+<td>理想截断</td>
+<td>$\mathbf{1}_{\lambda\le\tau}$</td>
+<td>理论分析，很少直接计算</td>
+</tr>
+</tbody>
+</table>
+<h2>三、离散化与稳定性</h2>
+<p>步长为 $h$ 的显式 Euler 格式为</p>
+<p>$$
+x_{k+1}=(I-hL)x_k.
+$$</p>
+<p>稳定性要求对每一个 $i$ 都有 $|1-h\lambda_i|\le 1$，因此</p>
+<p>$$
+0\le h\le\frac{2}{\lambda_{\max}(L)}.
+$$</p>
+<p>如果还希望组合拉普拉斯算子对应的 $I-hL$ 逐项非负，那么更严格的充分条件 $h\le 1/d_{\max}$ 很自然。</p>
+<p>:::warning[看似无害的步长]
+如果按运行时间是否方便，而不是按谱来选择 $h$，就可能造成振荡或发散。在高度异质的图中，对平均度安全的步长，未必对枢纽顶点安全。
+:::</p>
+<p>隐式 Euler 格式</p>
+<p>$$
+(I+hL)x_{k+1}=x_k
+$$</p>
+<p>无条件稳定，但需要求解线性系统。Crank–Nicolson 格式使用</p>
+<p>$$
+\left(I+\frac{h}{2}L\right)x_{k+1}
+=\left(I-\frac{h}{2}L\right)x_k,
+$$</p>
+<p>具有二阶精度，不过在较大的 $h$ 下不一定保持单调。</p>
+<h3>3.1 误差分解</h3>
+<p>对于数值近似 $\widetilde{x}(t)$，将误差分成两部分很有帮助：</p>
+<p>$$
+\lVert \widetilde{x}(t)-e^{-tL}x_0\rVert_2
+\le
+\underbrace{\lVert \widetilde{x}(t)-p_m(L)x_0\rVert_2}<em>{\text{算术或求解器误差}}
++
+\underbrace{\lVert p_m(L)-e^{-tL}\rVert_2\lVert x_0\rVert_2}</em>{\text{近似误差}}.
+$$</p>
+<p>这种分解避免一种常见调试错误：提高浮点精度无法修复次数不足的多项式。</p>
+<h2>四、不计算特征向量的快速近似</h2>
+<p>稠密特征分解需要 $O(n^3)$ 时间与 $O(n^2)$ 内存。对于具有 $m=|E|$ 条边的稀疏图，真正相关的基本操作是稀疏矩阵—向量乘法，其代价为 $O(m+n)$。</p>
+<h3>4.1 Chebyshev 近似</h3>
+<p>假设 $L$ 的谱位于 $[0,\lambda_{\max}]$。通过</p>
+<p>$$
+\widetilde{L}=\frac{2}{\lambda_{\max}}L-I
+$$</p>
+<p>把谱映射到 $[-1,1]$，再用</p>
+<p>$$
+p_K(L)=\sum_{k=0}^{K}c_kT_k(\widetilde{L})
+$$</p>
+<p>近似 $e^{-tL}$，其中 $T_0(z)=1$、$T_1(z)=z$，并且</p>
+<p>$$
+T_{k+1}(z)=2zT_k(z)-T_{k-1}(z).
+$$</p>
+<p>算法只需要三个工作向量。系数可以通过目标函数在 Chebyshev 节点上的离散余弦变换求得。</p>
+<pre><code>from __future__ import annotations
+
+import numpy as np
+from scipy.sparse import csr_matrix, eye
+
+
+def chebyshev_apply(
+    laplacian: csr_matrix,
+    signal: np.ndarray,
+    coefficients: np.ndarray,
+    lambda_max: float,
+) -&gt; np.ndarray:
+    """把 Chebyshev 多项式作用于稀疏图信号。"""
+    n = laplacian.shape[0]
+    scaled = (2.0 / lambda_max) * laplacian - eye(n, format="csr")
+
+    t0 = signal.copy()
+    result = coefficients[0] * t0
+    if len(coefficients) == 1:
+        return result
+
+    t1 = scaled @ signal
+    result += coefficients[1] * t1
+
+    for coefficient in coefficients[2:]:
+        t2 = 2.0 * (scaled @ t1) - t0
+        result += coefficient * t2
+        t0, t1 = t1, t2
+
+    return result
+</code></pre>
+<p>:::caution[不要猜测谱区间]
+如果对 $\lambda_{\max}$ 的估计太小，部分谱会被映射到 $[-1,1]$ 之外，而 Chebyshev 递推在该区域可能迅速增长。安全的上界胜过乐观但错误的估计。
+:::</p>
+<h3>4.2 Krylov 投影</h3>
+<p>$r$ 维 Krylov 空间为</p>
+<p>$$
+\mathcal{K}_r(L,x_0)
+=\operatorname{span}{x_0,Lx_0,\ldots,L^{r-1}x_0}.
+$$</p>
+<p>Lanczos 迭代构造正交归一基 $Q_r$ 与对称三对角矩阵 $T_r=Q_r^\top LQ_r$。于是</p>
+<p>$$
+e^{-tL}x_0
+\approx
+\lVert x_0\rVert_2 Q_r e^{-tT_r}e_1.
+$$</p>
+<p>高代价计算仍然是稀疏的；只有小型 $r\times r$ 矩阵的指数是稠密计算。</p>
+<p>:::fold[Lanczos 热扩散步骤的伪代码]</p>
+<pre><code>q₁ ← x / ‖x‖₂
+q₀ ← 0, β₀ ← 0
+for j = 1, …, r:
+    z ← Lqⱼ − βⱼ₋₁qⱼ₋₁
+    αⱼ ← qⱼᵀz
+    z ← z − αⱼqⱼ
+    z ← reorthogonalize(z, q₁, …, qⱼ)
+    βⱼ ← ‖z‖₂
+    qⱼ₊₁ ← z / βⱼ
+return ‖x‖₂ Qᵣ exp(−tTᵣ)e₁
+</code></pre>
+<p>:::</p>
+<h2>五、实现流水线</h2>
+<p>计算依赖可以概括如下：</p>
+<pre><code>flowchart LR
+    E[边列表] --&gt; A[稀疏邻接矩阵]
+    A --&gt; D[顶点度]
+    A --&gt; L[拉普拉斯算子]
+    D --&gt; L
+    L --&gt; B[谱上界]
+    B --&gt; C[Chebyshev 系数]
+    L --&gt; R[稀疏递推]
+    C --&gt; R
+    X[输入信号] --&gt; R
+    R --&gt; Y[扩散后信号]
+    Y --&gt; V[不变量检查]
+</code></pre>
+<h3>5.1 TypeScript 参考类型</h3>
+<pre><code>type VertexId = number
+
+interface WeightedEdge {
+  readonly source: VertexId
+  readonly target: VertexId
+  readonly weight: number
+}
+
+interface CSRMatrix {
+  readonly rows: number
+  readonly rowPtr: Uint32Array
+  readonly columnIndex: Uint32Array
+  readonly values: Float64Array
+}
+
+export function assertFiniteSignal(x: Float64Array): void {
+  for (const [index, value] of x.entries()) {
+    if (!Number.isFinite(value))
+      throw new RangeError(`signal[${index}] is not finite: ${value}`)
+  }
+}
+</code></pre>
+<h3>5.2 Rust 稀疏乘法</h3>
+<pre><code>#[derive(Debug)]
+pub struct CsrMatrix {
+    pub rows: usize,
+    pub row_ptr: Vec&lt;usize&gt;,
+    pub col_idx: Vec&lt;usize&gt;,
+    pub values: Vec&lt;f64&gt;,
+}
+
+impl CsrMatrix {
+    pub fn mul_vec(&amp;self, x: &amp;[f64]) -&gt; Vec&lt;f64&gt; {
+        assert_eq!(x.len(), self.rows);
+        let mut y = vec![0.0; self.rows];
+
+        for row in 0..self.rows {
+            let range = self.row_ptr[row]..self.row_ptr[row + 1];
+            y[row] = range
+                .map(|p| self.values[p] * x[self.col_idx[p]])
+                .sum();
+        }
+        y
+    }
+}
+</code></pre>
+<h3>5.3 储存加权边</h3>
+<pre><code>CREATE TABLE graph_edge (
+    graph_id     BIGINT           NOT NULL,
+    source_id    BIGINT           NOT NULL,
+    target_id    BIGINT           NOT NULL,
+    weight       DOUBLE PRECISION NOT NULL CHECK (weight &gt;= 0),
+    PRIMARY KEY (graph_id, source_id, target_id),
+    CHECK (source_id &lt; target_id)
+);
+
+CREATE INDEX graph_edge_target_idx
+    ON graph_edge (graph_id, target_id);
+</code></pre>
+<h3>5.4 可复现的命令行运行</h3>
+<pre><code>set -euo pipefail
+
+python -m graphdiff.prepare \
+  --edges data/edges.parquet \
+  --output build/graph.npz
+
+python -m graphdiff.solve \
+  --graph build/graph.npz \
+  --time 2.5 \
+  --degree 48 \
+  --seed 20260830
+</code></pre>
+<p>配置可以保持为普通、便于审阅的文本：</p>
+<pre><code>operator: combinatorial-laplacian
+solver:
+  method: chebyshev
+  degree: 48
+  spectral_bound: power-iteration
+validation:
+  mass_tolerance: 1.0e-10
+  energy_tolerance: 1.0e-12
+</code></pre>
+<h2>六、测试数学不变量</h2>
+<p>数值测试应当表达数学事实，而不只是检查样例输出。</p>
+<pre><code>def test_heat_step_preserves_mass(heat_step, signal):
+    result = heat_step(signal, time=0.75)
+    assert abs(result.sum() - signal.sum()) &lt; 1e-10
+
+
+def test_heat_step_does_not_increase_laplacian_energy(
+    heat_step, laplacian, signal
+):
+    before = signal @ (laplacian @ signal)
+    result = heat_step(signal, time=0.75)
+    after = result @ (laplacian @ result)
+    assert after &lt;= before + 1e-12
+</code></pre>
+<p>优化期间可以使用一份紧凑检查表：</p>
+<ul>
+<li>[x] 对称性，或明确记录有向图语义；</li>
+<li>[x] 非负权重与明确的孤立顶点策略；</li>
+<li>[x] 在容差范围内保持质量；</li>
+<li>[x] Dirichlet 能量不增加；</li>
+<li>[ ] 基准测试与正确性测试分离；</li>
+<li>[ ] 在多种谱间隙上测试近似次数。</li>
+</ul>
+<p>:::fold[为什么逐分量测试不够？]
+一个求解器可能在少量手写图上产生看似合理的数值，却在更大输入上违反结构不变量。基于性质的测试可以生成非负对称邻接矩阵，形成拉普拉斯算子，并在许多信号与时间尺度上检查守恒性和收缩性。
+:::</p>
+<h2>七、复杂度与方法选择</h2>
+<p>令 $m$ 为无向边数量，$K$ 为多项式次数，$r$ 为 Krylov 空间维数，$s$ 为右端项数量。</p>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>时间</th>
+<th>额外内存</th>
+<th>最合适的情形</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>稠密特征分解</td>
+<td>$O(n^3+sn^2)$</td>
+<td>$O(n^2)$</td>
+<td>小型图、许多滤波器</td>
+</tr>
+<tr>
+<td>显式 Euler</td>
+<td>$O(km)$</td>
+<td>$O(n)$</td>
+<td>简单局部步骤、严格控制稳定性</td>
+</tr>
+<tr>
+<td>Chebyshev</td>
+<td>$O(Km)$</td>
+<td>$O(n)$</td>
+<td>谱区间已知、多个相似信号</td>
+</tr>
+<tr>
+<td>Lanczos/Krylov</td>
+<td>$O(rm+r^2n+r^3)$</td>
+<td>$O(rn)$</td>
+<td>少量信号需要高精度</td>
+</tr>
+<tr>
+<td>隐式求解</td>
+<td>取决于求解器</td>
+<td>取决于求解器</td>
+<td>刚性问题、可复用预条件器</td>
+</tr>
+</tbody>
+</table>
+<p>渐近复杂度表不是最终判决。缓存局部性、图划分、系数复用、加速器传输与停止准则，都可能主导实际运行时间。</p>
+<h2>八、结论</h2>
+<p>谱记号赋予图扩散以概念上的简洁：</p>
+<p>$$
+g(L)x=Ug(\Lambda)U^\top x.
+$$</p>
+<p>稀疏计算则赋予它规模。真正的技艺，在于保持谱表达式的意义，同时用可以审计、估计误差和测试的递推取代全局特征向量。Chebyshev 方法利用谱区间；Krylov 方法让局部子空间适应信号；隐式方法则用线性求解换取无条件稳定性。</p>
+<p>这个教训超越了扩散本身。只要一个矩阵函数容易定义却难以显式形成，正确的计算对象往往不是矩阵 $g(L)$ 本身，而是它的作用 $g(L)x$，以及能够证明这种作用仍然忠于数学结构的不变量。</p>
+<blockquote>
+<p>计算作用，保持不变量，并把近似误差当作一等对象。</p>
+</blockquote>
+<p>[AI 生成｜仅用于测试]</p>
+]]></content:encoded>
+            <author>Leander Chan</author>
+        </item>
+        <item>
+            <title><![CDATA[注意、有限性与生活的形状]]></title>
+            <link>https://parsnip77.github.io//zh/posts/attention-and-finitude/</link>
+            <guid isPermaLink="false">https://parsnip77.github.io//zh/posts/attention-and-finitude/</guid>
+            <pubDate>Sun, 30 Aug 2026 01:00:00 GMT</pubDate>
+            <description><![CDATA[一篇讨论注意如何作为有限生活的实践形式，并由此生成生活的形状、价值与责任的哲学论文。]]></description>
+            <content:encoded><![CDATA[<h2>摘要</h2>
+<p>我们经常把注意说成一束心灵的探照灯：它是一件中性的工具，可以先照向一个对象，再转向另一个对象。本文提出一个更强的主张：**注意不仅是人所使用的东西，也是人得以成为某个人的主要方式之一。**因为人的生命有限，每一次持续的关注也都是一次排除，每一个在场的承诺也都是一次拒绝，而每一种被培养出来的感知习惯，都在逐渐赋予经验以形状。</p>
+<p>论证分为三个阶段。首先，注意不是一种脱离身体的能力，而是一种具有选择性的具身实践。其次，有限性正是注意能够具有价值的条件。最后，责任并不意味着注意一切——那是不可能的——而是意味着我们必须为自己反复形成的注意模式负责。</p>
+<p>:::note[阅读说明]
+在日常语言中，“注意”“关怀”和“在场”彼此重叠，但本文不把它们视为同义词。注意指选择的结构；关怀指赋予价值的方式；在场则指一种时间上的纪律，使选择与价值能够持续。
+:::</p>
+<hr />
+<h2>一、中性注意的神话</h2>
+<p>关于注意，最简单的图景是光学式的：世界已经完整地存在于那里，而意识只照亮其中的一小部分。光束以内的东西变得清楚，光束以外的东西只是没有被看见。按照这种图景，注意改变的是观察者接近世界的方式，却不改变被观察之物的意义。</p>
+<p>这个图景很有用，但并不完整。光束不会学习如何照明，人的注意却会。它受到语言、制度、欲望、疲惫、记忆、恐惧与期待的训练。专家在新手只听见噪声的地方听见结构；焦虑的旅人在一个暧昧的动作中识别出威胁；朋友则会留意到陌生人错过的一次迟疑。感知从来不只是数据的抵达，它已经是一项被历史塑造的成就。</p>
+<blockquote>
+<p>我们并不是先接收一个已经完成的世界，然后才决定其中什么重要。在学习注意什么的过程中，我们参与创造了一个能够对我们具有意义的世界。</p>
+</blockquote>
+<p>这并不意味着现实可以任意发明。悬崖不会因为无人注意就失去危险。它意味着，事物的<em>显著性</em>存在于关系之中：一个事实可以在场，却没有真正进入实践；一样东西可以清晰可见，却没有成为思考与行动的理由。</p>
+<h3>作为选择的注意</h3>
+<p>选择至少包含四个层次：</p>
+<ol>
+<li><strong>感觉选择</strong>决定哪些信号从拥挤的环境中浮现出来。</li>
+<li><strong>概念选择</strong>决定我们用什么描述去理解信号。</li>
+<li><strong>情感选择</strong>决定什么显得紧急、诱人、羞耻或可以忽略。</li>
+<li><strong>实践选择</strong>决定什么最终成为行动的理由。</li>
+</ol>
+<p>这些层次可以区分，却无法完全分离。一声提示音可能被听见、被辨认为消息、被感到迫切，并在人明确选择任何一步之前就得到回复。看似简单的一次 <code>click</code>，只是某种后天倾向露出水面的尖端。</p>
+<p>:::tip[一个小型诊断]
+若要发现某种注意习惯的结构，可以问四个问题：什么最先出现？它以什么名字出现？什么感受伴随它？它邀请了什么行动？
+:::</p>
+<h3>一段排版插曲</h3>
+<p>同一个命题可以用不同语域重新表达。用普通语言说：<em>我们逐渐习惯于先看见某些东西，再看见另一些东西</em>。用更强的说法：<strong>注意的等级会成为“对我们而言的现实”的等级</strong>。若压缩成符号，可以把事件的经验重要性写作 $S(e \mid h, c)$，其中 $h$ 是习惯的历史，$c$ 是当下语境；事件本身并不能独立决定它的显著性。</p>
+<p>这一段有意混合不同标点和文字，以测试页面的节奏：“中文双引号”、‘中文单引号’、英文 “quotation marks”、破折号——以及省略号……；还有 naïveté、déjà vu、façade、Überlegung、Straße、corazón、razón，以及希腊语 <em>prosochē</em>（προσοχή）。好的排版应当让差异清楚可辨，又不使页面显得躁动。</p>
+<h2>二、作为价值条件的有限性</h2>
+<p>如果注意是无限的，它就会失去大部分伦理和存在论意义。一个能够永远、完美地注意每一个对象的存在者，不必在近处与远方、紧迫与重要、已经许下的承诺与突然出现的可能之间作出选择。相反，对有限的存在者而言，注意至少在三个意义上是稀缺的：</p>
+<ul>
+<li>一天只有有限的清醒时间；</li>
+<li>心智能够同时维持的要求数量有限；</li>
+<li>一生中能够被推进到足以产生深度的计划也有限。</li>
+</ul>
+<p>稀缺并不会自动创造价值，但它创造了一个无法逃避评价的场域。注意某物，就是花费一种无法在同一时刻再次花费的东西。</p>
+<p>:::important[核心主张]
+有限性并不是附加在某种完整注意能力之上的不幸限制。它是注意之所以能够被称为奉献、忽视、忠诚、分心、耐心或牺牲的背景。
+:::</p>
+<h3>在场的机会成本</h3>
+<p>经济学把机会成本描述为被放弃的最佳替代方案的价值。把这个概念用于“在场”时，它会获得更丰富的哲学意义。陪伴一位正在哀伤的朋友，其意义不只来自交谈的内容；它还意味着，在那一个小时里，我们没有优化另一项任务、经营另一段关系，或消费另一条信息流。</p>
+<table>
+<thead>
+<tr>
+<th>注意方式</th>
+<th>它使什么成为可能</th>
+<th>典型危险</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>专注</td>
+<td>深度、连续性、困难工作</td>
+<td>视野狭窄</td>
+</tr>
+<tr>
+<td>警觉</td>
+<td>对变化迅速反应</td>
+<td>长期焦虑</td>
+</tr>
+<tr>
+<td>接受</td>
+<td>惊异、相遇、学习</td>
+<td>被动</td>
+</tr>
+<tr>
+<td>关怀</td>
+<td>持续承认另一个人</td>
+<td>占有欲</td>
+</tr>
+<tr>
+<td>反思</td>
+<td>修正自己的习惯</td>
+<td>无尽延宕</td>
+</tr>
+</tbody>
+</table>
+<p>表格中的任何一行都不只是善或恶。注意的德性不是数量最大化，而是对象、时长、情境与代价之间形成恰当关系。</p>
+<h3>反对完美捕获的幻想</h3>
+<p>当代工具鼓励一种幻想：任何东西都不必失去。我们收藏文章、拍下食物、录制讲座、归档对话，并承诺以后再回来看。档案当然有用，但它会遮蔽“保存一个对象”与“曾经注意这个对象”之间的差异。</p>
+<ul>
+<li>[x] 文件可以被储存。</li>
+<li>[x] 日期可以被索引。</li>
+<li>[ ] 错过的相遇总能被重建。</li>
+<li>[ ] 没有活过的一小时可以从元数据中恢复。</li>
+</ul>
+<p>最后两个方框仍然空着。一份记录可以成为未来注意行为的材料，却不能倒过来制造事件发生时并不存在的那种在场品质。</p>
+<p>:::warning[档案不是记忆]
+档案降低了检索成本，却没有消灭解释、遗忘与死亡。把储存视为记忆，是把占有误认为关系。
+:::</p>
+<h2>三、注意的伦理学</h2>
+<p>注意的伦理学不能命令我们注意一切。这样的命令本身就不连贯，因为服从它的尝试会摧毁使注意成为可能的选择性。真正相关的问题是：<strong>一个人能够在多大程度上为自己的注意模式负责？</strong></p>
+<p>三个标准可以帮助判断：</p>
+<ol>
+<li>**可修正性。**当扭曲的证据出现时，这种模式能否改变？</li>
+<li>**互惠性。**它能否让他人作为经验的中心出现，而不是只作为自己故事里的功能？</li>
+<li>**合比例性。**注意的强度是否与对象的重要性和紧迫性相称？</li>
+</ol>
+<h4>背景的道德重要性</h4>
+<p>不正义能够持续，往往不是因为每一个参与者都明确支持它，而是因为某些痛苦始终停留在背景噪声中。在报告、会议、模型和故事里反复被省略的东西，会越来越难以被当作真实。因此，改变词汇有时能够改变感知：新词并没有制造一种经验，却能使这种经验变得可识别、可讨论。</p>
+<p>与此同时，可见性并不等同于正义。一个人可以极其显眼，却仍然被误解。公共注意可能把对象压扁成符号、案例或奇观。因此，要求承认不一定意味着要求更多曝光；有时它意味着要求更好的描述、更慢的判断，或者不被观看的权利。</p>
+<p>:::caution[可见性具有两面政治]
+不被看见可能意味着排斥；始终被看见也可能意味着监控。合乎伦理的注意必须区分承认与曝光，也必须区分好奇与自以为有权观看。
+:::</p>
+<h2>四、审慎注意的实践</h2>
+<p>哲学真正进入实践，并不是因为它提供了一张普遍清单，而是因为它改变了日常行为中能够被注意的东西。下面的练习有意保持朴素：</p>
+<ul>
+<li>在总结一页困难文字之前，把它读两遍。</li>
+<li>在交谈中多等待片刻，看看停顿究竟是空白还是意义。</li>
+<li>留出一小时，不把任何活动转换成供以后展示的记录。</li>
+<li>当某个问题显得理所当然时，写出一个持不同经验者所能给出的最强描述。</li>
+<li>一周结束时，不只问“我做了什么”，也问“什么反复捕获了我”。</li>
+</ul>
+<p>:::fold[反对意见：审慎注意会不会变成自我监控？]
+会有这种可能。一个监视每一次注意波动的人，可能变得更不在场，而不是更在场。反思的目的不是在每一个念头上方安装一位内部监督者，而是让持久的模式偶尔变得可以修正。习惯应当承担日常生活的大部分工作；只有当习惯系统性地辜负其对象时，反思才需要介入。
+:::</p>
+<p>因此，实践理想既不是完全控制，也不是自发的天真，而是一种节奏：沉浸、中断、检视，然后返回。</p>
+<p><img src="/icons/og-logo.png" alt="以磁场比喻具有模式的注意" title="吸引具有结构，而非中性" /></p>
+<p>这张图只是一种类比。磁场不能选择自身方向，而人有时能够修正那些组织感知的力量。但这个类比仍然有用：注意很少是一束孤立的光，它更像一个具有梯度、吸引与阻力区域的场。</p>
+<h2>五、结论：生活具有边缘</h2>
+<p>生活因为具有边缘而获得形状。有些对话无法无限继续，有些技能永远不会被我们掌握，有些语言不会被我们学会，有些伤害没能被及时看见，还有一些可能的自我必须留在未实现的状态。这不是一个要求放弃的论证，而是一个反对把限制视为暂时技术故障的论证。</p>
+<p>伦理任务不是消灭选择，而是清醒地居住在选择之中。我们应当追问：自己的注意反复放大什么、把什么推向边缘、允许谁说话，又把何种沉默误认为不存在。答案永远不会最终完成，因为注意本身也会在经验的压力下改变。</p>
+<blockquote>
+<p>一生的形状，与其说由遭遇之物的总数勾勒，不如说由我们让某些事物变得重要时所表现的忠诚、扭曲与勇气勾勒。</p>
+</blockquote>
+<p>从这个意义上说，注意既谦逊，又参与创造世界。它从承认我们无法接收一切开始；当我们理解自己反复接收——或拒绝接收——的东西会帮助决定自己与他人必须生活于其中的世界时，它才成为一种责任。[^1]</p>
+<p>[^1]: 若要寻找与此相关的思想史词汇，可以参考古代伦理学对 <em>prosochē</em> 的讨论，以及二十世纪道德哲学中关于“注意”的论述。本文采取综合性论证，而非历史考据。</p>
+<h3>技术参考</h3>
+<p>承载本文的站点使用下列开源项目构建：</p>
+<p>::github{repo="withastro/astro"}</p>
+<p>[AI 生成｜仅用于测试]</p>
+]]></content:encoded>
+            <author>Leander Chan</author>
+        </item>
         <item>
             <title><![CDATA[叙事的陷阱]]></title>
             <link>https://parsnip77.github.io//zh/posts/narrative-trap/</link>
