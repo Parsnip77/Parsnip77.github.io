@@ -3,18 +3,18 @@
 <rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom">
     <channel>
         <title>Leander's Blog</title>
-        <link>https://parsnip77.github.io//</link>
+        <link>https://leanderc.com//</link>
         <description>Leander's Blog | Journal, Essay &amp; Research</description>
-        <lastBuildDate>Sun, 30 Aug 2026 08:41:17 GMT</lastBuildDate>
+        <lastBuildDate>Sun, 30 Aug 2026 09:15:24 GMT</lastBuildDate>
         <docs>https://validator.w3.org/feed/docs/rss2.html</docs>
         <generator>Leander's Blog with Astro and Feed for Node.js</generator>
         <language>en</language>
         <copyright>Copyright © 2026 Leander Chan</copyright>
-        <atom:link href="https://parsnip77.github.io/rss.xml" rel="self" type="application/rss+xml"/>
+        <atom:link href="https://leanderc.com/rss.xml" rel="self" type="application/rss+xml"/>
         <item>
             <title><![CDATA[Spectral Methods for Graph Diffusion: From Laplacians to Fast Solvers]]></title>
-            <link>https://parsnip77.github.io//posts/spectral-graph-diffusion/</link>
-            <guid isPermaLink="false">https://parsnip77.github.io//posts/spectral-graph-diffusion/</guid>
+            <link>https://leanderc.com//posts/spectral-graph-diffusion/</link>
+            <guid isPermaLink="false">https://leanderc.com//posts/spectral-graph-diffusion/</guid>
             <pubDate>Sun, 30 Aug 2026 02:00:00 GMT</pubDate>
             <description><![CDATA[A technical study of graph diffusion, spectral filtering, stability, and practical implementations in Python, TypeScript, Rust, SQL, and shell workflows.]]></description>
             <content:encoded><![CDATA[<h2>Abstract</h2>
@@ -445,8 +445,8 @@ $$</p>
         </item>
         <item>
             <title><![CDATA[Attention, Finitude, and the Shape of a Life]]></title>
-            <link>https://parsnip77.github.io//posts/attention-and-finitude/</link>
-            <guid isPermaLink="false">https://parsnip77.github.io//posts/attention-and-finitude/</guid>
+            <link>https://leanderc.com//posts/attention-and-finitude/</link>
+            <guid isPermaLink="false">https://leanderc.com//posts/attention-and-finitude/</guid>
             <pubDate>Sun, 30 Aug 2026 01:00:00 GMT</pubDate>
             <description><![CDATA[A philosophical essay on attention as the practical form through which a finite life acquires shape, value, and responsibility.]]></description>
             <content:encoded><![CDATA[<h2>Abstract</h2>
