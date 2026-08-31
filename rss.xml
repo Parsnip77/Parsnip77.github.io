@@ -5,12 +5,700 @@
         <title>Leander's Blog</title>
         <link>https://leanderc.com//</link>
         <description>Leander's Blog | Journal, Essay &amp; Research</description>
-        <lastBuildDate>Mon, 31 Aug 2026 08:03:31 GMT</lastBuildDate>
+        <lastBuildDate>Mon, 31 Aug 2026 08:49:53 GMT</lastBuildDate>
         <docs>https://validator.w3.org/feed/docs/rss2.html</docs>
         <generator>Leander's Blog with Astro and Feed for Node.js</generator>
         <language>en</language>
         <copyright>Copyright © 2026 Leander Chan</copyright>
         <atom:link href="https://leanderc.com/rss.xml" rel="self" type="application/rss+xml"/>
+        <item>
+            <title><![CDATA[A Practical Guide to LightGBM: Usage, Tuning, and Optimization]]></title>
+            <link>https://leanderc.com//posts/lightgbm-practical-guide/</link>
+            <guid isPermaLink="false">https://leanderc.com//posts/lightgbm-practical-guide/</guid>
+            <pubDate>Mon, 31 Aug 2026 03:25:44 GMT</pubDate>
+            <description><![CDATA[A hands-on guide to LightGBM interfaces, objectives, validation, systematic tuning, and performance optimization for classification, regression, and ranking.]]></description>
+            <content:encoded><![CDATA[<p>LightGBM makes it easy to train a first model, but using it correctly takes more care. In real projects, the hard part is rarely the <code>fit()</code> call itself. It is usually the interaction among four decisions: whether the training interface fits the task, whether the objective matches the problem, whether the validation set represents production data, and whether tree capacity and regularization are balanced.</p>
+<p>This article assumes that you already understand decision trees, gradient boosting, overfitting, and cross-validation. It does not revisit fundamentals such as information gain. Instead, it focuses on applying LightGBM to binary classification, multiclass classification, regression, and Learning-to-Rank; understanding what commonly used parameters actually control; and diagnosing problems from training behavior.</p>
+<p>:::note[Version note]
+The APIs and parameters in this article follow the LightGBM 4.7 stable documentation. The sklearn wrappers in 4.7 introduce <code>eval_X</code> and <code>eval_y</code> and deprecate <code>eval_set=[(X_valid, y_valid)]</code>. If your project still uses version 4.6 or earlier, replace <code>eval_X</code> and <code>eval_y</code> in the examples with <code>eval_set</code>. Pin the dependency version in production projects instead of allowing the same training code to upgrade with the environment.
+:::</p>
+<h2>How LightGBM's implementation affects practical use</h2>
+<p>LightGBM is still an additive gradient boosting model. At iteration $t$, it adds a new tree $f_t$ to the existing prediction $F_{t-1}$, while the learning rate $\eta$ controls the update size:</p>
+<p>$$
+F_t(x)=F_{t-1}(x)+\eta f_t(x)
+$$</p>
+<p>Compared with other GBDT implementations, several engineering choices in LightGBM map directly to parameters you need to understand.</p>
+<p><strong>Histogram-based splits</strong>: continuous features are first discretized into a finite number of bins. When a node searches for a split, it scans the bins rather than every original value. <code>max_bin</code> controls discretization granularity, <code>min_data_in_bin</code> sets the minimum number of samples in a bin, and <code>subsample_for_bin</code> controls how many samples are used to construct the bins. Reducing <code>max_bin</code> usually lowers time and memory costs, but may remove useful fine-grained split points.</p>
+<p><strong>Leaf-wise growth</strong>: at each step, LightGBM splits only the leaf with the largest gain instead of expanding the tree level by level. For the same number of leaves, this often reduces training loss faster, but it can also create deep branches supported by very few samples. Consequently, <code>num_leaves</code>, <code>min_child_samples</code>, and <code>min_child_weight</code> are often more important than setting <code>max_depth</code> alone.</p>
+<p><strong>Native categorical splits and sparse optimization</strong>: categorical features can be split by sets of categories without first being expanded into one-hot columns, and sparse inputs have dedicated histogram optimizations. Category encoding, missing values, and zeros in sparse matrices therefore have explicit semantics. Converting everything to numbers and passing it to the model without checking those semantics is unsafe.</p>
+<p>The original LightGBM paper emphasizes GOSS and EFB. In current versions, GOSS is selected with <code>data_sample_strategy="goss"</code>, while <code>boosting_type</code> selects <code>gbdt</code>, <code>dart</code>, or <code>rf</code>. This differs from older versions that placed <code>goss</code> under <code>boosting_type</code>. See the official <a href="https://lightgbm.readthedocs.io/en/stable/Features.html">Features</a> page and the <a href="https://papers.nips.cc/paper/2017/hash/6449f44a102fde848669bdd9eb6b76fa-Abstract.html">original paper</a> for an algorithm overview.</p>
+<h2>Choose a Python interface, then standardize parameter names</h2>
+<p>The LightGBM Python package provides both sklearn-style wrappers and native training APIs. They use the same underlying Booster, but differ in their data objects, parameter names, and return values.</p>
+<table>
+<thead>
+<tr>
+<th>Use case</th>
+<th>Recommended interface</th>
+<th>Training rounds</th>
+<th>Validation data</th>
+<th>Result object</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>sklearn Pipeline, search tools, or metric ecosystem</td>
+<td><code>LGBMClassifier</code>, <code>LGBMRegressor</code></td>
+<td><code>n_estimators</code></td>
+<td><code>eval_X</code>, <code>eval_y</code></td>
+<td>sklearn estimator; underlying model in <code>booster_</code></td>
+</tr>
+<tr>
+<td>Learning-to-Rank</td>
+<td><code>LGBMRanker</code></td>
+<td><code>n_estimators</code></td>
+<td>also requires <code>group</code>, <code>eval_group</code></td>
+<td>ranker; underlying model in <code>booster_</code></td>
+</tr>
+<tr>
+<td>Direct Dataset control, native cross-validation, or custom objectives</td>
+<td><code>lgb.train()</code>, <code>lgb.cv()</code></td>
+<td><code>num_boost_round</code></td>
+<td><code>valid_sets</code></td>
+<td><code>Booster</code> or CV result dictionary</td>
+</tr>
+<tr>
+<td>Distributed Dask data</td>
+<td><code>DaskLGBMClassifier</code>, etc.</td>
+<td><code>n_estimators</code></td>
+<td>provided through the distributed interface</td>
+<td>Dask estimator</td>
+</tr>
+</tbody>
+</table>
+<p><code>LGBMRanker</code> exposes an sklearn-style API, but sklearn itself has no unified ranking-task protocol. It therefore cannot plug into every sklearn meta-estimator as seamlessly as classifiers and regressors. The official <a href="https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMRanker.html"><code>LGBMRanker</code> API</a> calls out this limitation explicitly.</p>
+<h3>Mapping sklearn parameters to native parameters</h3>
+<p>The official documentation provides aliases for many parameters. To keep logs and experiments comparable, choose one naming convention within a project. Do not mix canonical names and aliases in the same parameter dictionary.</p>
+<table>
+<thead>
+<tr>
+<th>sklearn wrapper name</th>
+<th>Native canonical name</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>n_estimators</code></td>
+<td><code>num_iterations</code></td>
+<td>Number of boosting rounds</td>
+</tr>
+<tr>
+<td><code>min_child_samples</code></td>
+<td><code>min_data_in_leaf</code></td>
+<td>Approximate minimum sample count in a leaf</td>
+</tr>
+<tr>
+<td><code>min_child_weight</code></td>
+<td><code>min_sum_hessian_in_leaf</code></td>
+<td>Minimum sum of Hessians in a leaf</td>
+</tr>
+<tr>
+<td><code>subsample</code></td>
+<td><code>bagging_fraction</code></td>
+<td>Fraction of rows kept for bagging</td>
+</tr>
+<tr>
+<td><code>subsample_freq</code></td>
+<td><code>bagging_freq</code></td>
+<td>Resampling interval; 0 disables bagging</td>
+</tr>
+<tr>
+<td><code>colsample_bytree</code></td>
+<td><code>feature_fraction</code></td>
+<td>Fraction of features used by each tree</td>
+</tr>
+<tr>
+<td><code>reg_alpha</code></td>
+<td><code>lambda_l1</code></td>
+<td>L1 regularization on leaf outputs</td>
+</tr>
+<tr>
+<td><code>reg_lambda</code></td>
+<td><code>lambda_l2</code></td>
+<td>L2 regularization on leaf outputs</td>
+</tr>
+<tr>
+<td><code>min_split_gain</code></td>
+<td><code>min_gain_to_split</code></td>
+<td>Minimum gain required to split</td>
+</tr>
+<tr>
+<td><code>n_jobs</code></td>
+<td><code>num_threads</code></td>
+<td>Number of training threads</td>
+</tr>
+</tbody>
+</table>
+<p>Parameter precedence also matters. In native <code>lgb.train()</code>, values in <code>params</code> can override some function arguments. The documentation recommends using canonical parameter names because canonical names and aliases follow fixed precedence rules when both are supplied. See the complete <a href="https://lightgbm.readthedocs.io/en/stable/Parameters.html">Parameters</a> reference.</p>
+<h3>What belongs in the constructor, <code>fit()</code>, and prediction methods</h3>
+<p>The constructor of an sklearn wrapper defines the model. <code>objective</code> specifies the training loss; <code>boosting_type</code> and tree parameters define how trees are built; <code>learning_rate</code> and <code>n_estimators</code> control the boosting process; sampling and regularization parameters constrain variance; and <code>random_state</code>, <code>n_jobs</code>, and <code>device_type</code> control randomness and the compute backend.</p>
+<p><code>fit()</code> receives information that belongs to a particular dataset: <code>X</code>, <code>y</code>, <code>sample_weight</code>, <code>categorical_feature</code>, validation data, validation metrics, and callbacks. Ranking tasks additionally require <code>group</code> and <code>eval_group</code>. The <code>init_model</code> argument continues training from an existing model.</p>
+<p>Common prediction-time parameters include:</p>
+<ul>
+<li><code>num_iteration</code>: how many rounds to use; when <code>best_iteration_</code> exists and no value is supplied explicitly, the best iteration is used by default;</li>
+<li><code>raw_score=True</code>: return the margin before the final transformation instead of probabilities or final predictions;</li>
+<li><code>pred_leaf=True</code>: return the leaf index reached in every tree;</li>
+<li><code>pred_contrib=True</code>: return per-feature contributions, with the expected value in the last column;</li>
+<li><code>validate_features=True</code>: when the input is a pandas DataFrame, verify that prediction columns match the training columns.</li>
+</ul>
+<p><code>objective</code> and <code>eval_metric</code> are not interchangeable. The objective produces training gradients and Hessians; the evaluation metric only measures validation performance. A model can train with binary log loss and use AUC for early stopping, but that does not mean the training procedure directly optimizes AUC.</p>
+<h2>Classification with <code>LGBMClassifier</code></h2>
+<h3>Objectives, metrics, and outputs for binary classification</h3>
+<p>Binary classification uses <code>objective="binary"</code>, and labels must be 0 or 1. <code>predict_proba(X)[:, 1]</code> returns the positive-class probability, whereas <code>predict(X)</code> returns class labels. Choose the business decision threshold separately from predicted probabilities instead of treating the default class prediction as cost-optimal.</p>
+<table>
+<thead>
+<tr>
+<th>Requirement</th>
+<th>Suitable validation metric</th>
+<th>Additional checks</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Measure overall ranking quality</td>
+<td><code>auc</code></td>
+<td>AUC may remain stable even when the class ratio changes</td>
+</tr>
+<tr>
+<td>Rare positives with emphasis on the head of the list</td>
+<td><code>average_precision</code> or external PR AUC</td>
+<td>Precision@K, Recall@K, and the operational capacity K</td>
+</tr>
+<tr>
+<td>Probabilities used for pricing or risk</td>
+<td><code>binary_logloss</code></td>
+<td>Brier score, calibration curve, and binned calibration error</td>
+</tr>
+<tr>
+<td>Decisions at a fixed threshold</td>
+<td>externally computed precision, recall, F1, or cost</td>
+<td>The threshold must be chosen on an independent validation set</td>
+</tr>
+</tbody>
+</table>
+<p>The baseline below uses AUC for early stopping and computes log loss independently after training.</p>
+<pre><code>import lightgbm as lgb
+from sklearn.metrics import log_loss, roc_auc_score
+
+categorical_columns = ["country", "device_type", "channel"]
+for column in categorical_columns:
+    X_train[column] = X_train[column].astype("category")
+    X_valid[column] = X_valid[column].astype(X_train[column].dtype)
+
+classifier = lgb.LGBMClassifier(
+    objective="binary",
+    n_estimators=5_000,
+    learning_rate=0.03,
+    num_leaves=31,
+    min_child_samples=100,
+    subsample=0.8,
+    subsample_freq=1,
+    colsample_bytree=0.8,
+    reg_lambda=1.0,
+    random_state=42,
+    n_jobs=-1,
+    verbosity=-1,
+)
+
+classifier.fit(
+    X_train,
+    y_train,
+    eval_X=X_valid,
+    eval_y=y_valid,
+    eval_metric="auc",
+    categorical_feature=categorical_columns,
+    callbacks=[
+        lgb.early_stopping(
+            stopping_rounds=200,
+            first_metric_only=True,
+            min_delta=1e-5,
+            verbose=False,
+        ),
+        lgb.log_evaluation(period=100),
+    ],
+)
+
+valid_probability = classifier.predict_proba(
+    X_valid,
+    num_iteration=classifier.best_iteration_,
+)[:, 1]
+
+print("best iteration:", classifier.best_iteration_)
+print("AUC:", roc_auc_score(y_valid, valid_probability))
+print("log loss:", log_loss(y_valid, valid_probability))
+</code></pre>
+<p><code>n_estimators=5_000</code> is an upper bound, not a promise that the model will train for exactly 5,000 rounds. Early stopping stores the best round in <code>best_iteration_</code>; <code>n_iter_</code> or <code>n_estimators_</code> records the number of rounds actually completed. <code>min_delta</code> filters out metric changes too small to be practically meaningful.</p>
+<p>When <code>boosting_type="dart"</code>, the <code>early_stopping()</code> callback has no effect. This is an explicit limitation of the official callback API. With DART, determine the number of rounds through another procedure instead of copying the training pattern above.</p>
+<h3>Three kinds of “weight” in imbalanced classification</h3>
+<p><code>scale_pos_weight</code> changes only the weight of the positive class in binary classification. A common starting point is $N_{-}/N_{+}$. <code>is_unbalance=True</code> asks LightGBM to account for the class distribution automatically; the two options cannot be used together. <code>sample_weight</code> assigns a weight to each observation and can represent exposure, correction for sampling probability, or different business costs.</p>
+<p>These weights alter the training loss; they do not merely change the classification threshold. The official documentation also warns that class weighting can degrade individual probability estimates. If the probabilities themselves have business meaning, recalibrate them on a calibration set that was not used to fit the model, using methods such as Platt scaling or isotonic calibration.</p>
+<p><code>pos_bagging_fraction</code> and <code>neg_bagging_fraction</code> can sample positive and negative rows at different rates, but both must be set and <code>bagging_freq</code> must be enabled. Once balanced bagging is active, the ordinary <code>bagging_fraction</code> is ignored. This changes which samples build each tree; it is not a loss weight.</p>
+<h3>Multiclass classification creates multiple trees per iteration</h3>
+<p>Multiclass classification usually uses <code>objective="multiclass"</code>, which applies softmax. <code>multiclassova</code> uses One-vs-All instead. The sklearn wrapper infers the number of classes from the labels, whereas the native interface requires <code>num_class</code>. Common metrics include <code>multi_logloss</code> and <code>multi_error</code>; macro/micro F1, per-class recall, and a confusion matrix can also be computed externally.</p>
+<pre><code>multiclassifier = lgb.LGBMClassifier(
+    objective="multiclass",
+    n_estimators=3_000,
+    learning_rate=0.04,
+    num_leaves=63,
+    min_child_samples=80,
+    class_weight="balanced",
+    random_state=42,
+    n_jobs=-1,
+)
+
+multiclassifier.fit(
+    X_train,
+    y_train,
+    eval_X=X_valid,
+    eval_y=y_valid,
+    eval_metric="multi_logloss",
+    callbacks=[lgb.early_stopping(150, first_metric_only=True)],
+)
+
+class_probability = multiclassifier.predict_proba(X_valid)
+predicted_class = multiclassifier.classes_[class_probability.argmax(axis=1)]
+</code></pre>
+<p>For $K$ classes, LightGBM builds $K$ trees within each boosting iteration. A four-class model trained for 500 iterations therefore contains roughly 2,000 trees. Training time, model size, and inference latency all grow with the class count. Record both the iteration count and the total number of trees when tuning multiclass models.</p>
+<h2>Regression with <code>LGBMRegressor</code></h2>
+<p>Regression is not limited to squared error. The objective determines which errors the model emphasizes and what statistical quantity its predictions represent.</p>
+<table>
+<thead>
+<tr>
+<th>Data and decision goal</th>
+<th><code>objective</code></th>
+<th>Key parameter</th>
+<th>Typical metrics</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Penalize large errors more heavily; predict the conditional mean</td>
+<td><code>regression</code></td>
+<td>No objective-specific parameter</td>
+<td><code>rmse</code>, <code>l2</code></td>
+</tr>
+<tr>
+<td>Robustness to outliers; predict the conditional median</td>
+<td><code>regression_l1</code></td>
+<td>No objective-specific parameter</td>
+<td><code>l1</code></td>
+</tr>
+<tr>
+<td>Preserve a smooth quadratic region while reducing outlier influence</td>
+<td><code>huber</code></td>
+<td><code>alpha</code></td>
+<td><code>huber</code>, MAE, RMSE</td>
+</tr>
+<tr>
+<td>Predict conditional quantiles such as P10, P50, and P90</td>
+<td><code>quantile</code></td>
+<td><code>alpha</code> is the target quantile</td>
+<td><code>quantile</code>, pinball loss</td>
+</tr>
+<tr>
+<td>Non-negative counts or event frequencies</td>
+<td><code>poisson</code></td>
+<td><code>poisson_max_delta_step</code></td>
+<td>Poisson deviance</td>
+</tr>
+<tr>
+<td>Strictly positive, right-skewed continuous response</td>
+<td><code>gamma</code></td>
+<td>No general-purpose shape parameter</td>
+<td><code>gamma</code>, <code>gamma_deviance</code></td>
+</tr>
+<tr>
+<td>Aggregate loss with many zeros and a right-skewed positive component</td>
+<td><code>tweedie</code></td>
+<td><code>tweedie_variance_power</code></td>
+<td><code>tweedie</code></td>
+</tr>
+</tbody>
+</table>
+<p>Choose the objective from the label-generating process and the business loss, not from whichever offline score happens to look higher. For example, <code>regression</code> is highly sensitive to a single large residual. If the label contains legitimate but extreme values, that sensitivity may be exactly what the business requires; switching to L1 solely for “outlier resistance” could be a mistake.</p>
+<h3>Mean regression and robust regression</h3>
+<p>The following example trains with a Huber objective and records both MAE and RMSE. <code>alpha</code> controls a parameter of the Huber objective; it cannot be interpreted independently of the objective or conflated with <code>alpha</code> in quantile regression.</p>
+<pre><code>import lightgbm as lgb
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+regressor = lgb.LGBMRegressor(
+    objective="huber",
+    alpha=0.9,
+    n_estimators=5_000,
+    learning_rate=0.03,
+    num_leaves=31,
+    min_child_samples=100,
+    reg_lambda=1.0,
+    random_state=42,
+    n_jobs=-1,
+)
+
+regressor.fit(
+    X_train,
+    y_train,
+    eval_X=X_valid,
+    eval_y=y_valid,
+    eval_metric="l1",
+    callbacks=[
+        lgb.early_stopping(200, first_metric_only=True),
+        lgb.log_evaluation(100),
+    ],
+)
+
+valid_prediction = regressor.predict(X_valid)
+print("MAE:", mean_absolute_error(y_valid, valid_prediction))
+print("RMSE:", mean_squared_error(y_valid, valid_prediction) ** 0.5)
+</code></pre>
+<p>Here, <code>l1</code> explicitly controls early stopping, while RMSE is computed independently after training. If the business settles outcomes by squared error, use <code>rmse</code> as the early-stopping metric instead. A training experiment should have one clearly defined primary early-stopping metric, with other metrics retained as diagnostics.</p>
+<h3>Quantile regression for prediction intervals</h3>
+<p>LightGBM's <code>quantile</code> objective fits one quantile at a time. Producing P10, P50, and P90 requires three separate models:</p>
+<pre><code>quantile_models = {}
+quantile_predictions = {}
+
+for alpha in (0.1, 0.5, 0.9):
+    model = lgb.LGBMRegressor(
+        objective="quantile",
+        alpha=alpha,
+        n_estimators=4_000,
+        learning_rate=0.03,
+        num_leaves=31,
+        min_child_samples=100,
+        random_state=42,
+    )
+    model.fit(
+        X_train,
+        y_train,
+        eval_X=X_valid,
+        eval_y=y_valid,
+        eval_metric="quantile",
+        callbacks=[lgb.early_stopping(200)],
+    )
+    quantile_models[alpha] = model
+    quantile_predictions[alpha] = model.predict(X_valid)
+</code></pre>
+<p>Separate training does not guarantee $\hat q_{0.1}\leq\hat q_{0.5}\leq\hat q_{0.9}$ for every sample, so check for quantile crossing before deployment. A prediction interval is also not automatically a confidence interval with a strict coverage guarantee. Measure empirical coverage on independent data and, when required, calibrate it with an external method such as conformal calibration.</p>
+<h3>Choosing among Poisson, Gamma, and Tweedie</h3>
+<p>These objectives are not ordinary switches for “forcing non-negative predictions.” Each makes a different assumption about the response distribution and the relationship between its mean and variance. Poisson is suitable for count-rate problems; Gamma is appropriate for strictly positive, right-skewed continuous quantities; Tweedie is often used for aggregate losses containing both a point mass at zero and a positive continuous component. The range of <code>tweedie_variance_power</code> is $[1,2)$: values near 1 are closer to Poisson, while values near 2 are closer to Gamma.</p>
+<p>Before using any of these objectives, inspect the label domain, the proportion of zeros, whether exposure belongs in a weight or offset, and whether the business evaluates aggregate amount, frequency, or individual severity. Changing objectives merely because ordinary regression emits a few negative predictions often hides an ill-defined problem.</p>
+<h2>Ranking with <code>LGBMRanker</code></h2>
+<p>In Learning-to-Rank, the unit of observation is not an independent row but a candidate set within a query. In search, one query may represent a retrieval request and its candidate documents; in recommendation, it may represent one request and its candidate products. The model output is a score for ordering candidates within a query. Comparing scores across queries is usually meaningless.</p>
+<h3>Constraints on labels and <code>group</code></h3>
+<p>Both <code>lambdarank</code> and <code>rank_xendcg</code> require integer relevance labels, with larger values indicating higher relevance. For <code>lambdarank</code>, the default <code>label_gain</code> maps relevance levels to $0,1,3,7,15,\ldots$. If the utility of your business relevance levels does not follow this mapping, specify <code>label_gain</code> explicitly.</p>
+<p><code>group</code> is not a row-level query ID. It is the number of rows in each query, listed in the current row order. If three queries have 4, 2, and 5 candidates, then <code>group=[4, 2, 5]</code> and <code>sum(group)=11</code>. Rows must first be ordered so that each query occupies a contiguous block. The validation set needs its own <code>eval_group</code> as well.</p>
+<p>Split the data at the query level. Candidates from one query cannot be divided between training and validation, because doing so breaks the group structure and leaks information from the same request into validation.</p>
+<h3>A complete LambdaRank training template</h3>
+<pre><code>import lightgbm as lgb
+
+train_frame = train_frame.sort_values("query_id", kind="stable")
+valid_frame = valid_frame.sort_values("query_id", kind="stable")
+
+feature_columns = [
+    column
+    for column in train_frame.columns
+    if column not in {"query_id", "relevance"}
+]
+
+X_train = train_frame[feature_columns]
+y_train = train_frame["relevance"].astype("int32")
+train_group = (
+    train_frame.groupby("query_id", sort=False)
+    .size()
+    .to_numpy()
+)
+
+X_valid = valid_frame[feature_columns]
+y_valid = valid_frame["relevance"].astype("int32")
+valid_group = (
+    valid_frame.groupby("query_id", sort=False)
+    .size()
+    .to_numpy()
+)
+
+ranker = lgb.LGBMRanker(
+    objective="lambdarank",
+    n_estimators=4_000,
+    learning_rate=0.03,
+    num_leaves=63,
+    min_child_samples=50,
+    lambdarank_truncation_level=13,
+    label_gain=[0, 1, 3, 7],
+    random_state=42,
+    n_jobs=-1,
+)
+
+ranker.fit(
+    X_train,
+    y_train,
+    group=train_group,
+    eval_X=X_valid,
+    eval_y=y_valid,
+    eval_group=[valid_group],
+    eval_metric="ndcg",
+    eval_at=[5, 10],
+    callbacks=[lgb.early_stopping(200, first_metric_only=True)],
+)
+
+valid_score = ranker.predict(X_valid)
+valid_result = valid_frame[["query_id", "relevance"]].copy()
+valid_result["score"] = valid_score
+valid_result["rank"] = (
+    valid_result.groupby("query_id")["score"]
+    .rank(method="first", ascending=False)
+)
+</code></pre>
+<p>This example primarily optimizes NDCG@5 and NDCG@10. <code>lambdarank_truncation_level</code> controls how many top results receive emphasis during training. The documentation recommends setting it slightly above the target NDCG@k in typical cases, so for an @10 target, a value around 13 is a reasonable starting point to compare—not a universal setting to copy.</p>
+<p><code>rank_xendcg</code> is another ranking objective. The parameter documentation describes it as faster and similar in performance to <code>lambdarank</code>, but this is not a guarantee for every dataset. Compare them under the same query split and the same <code>eval_at</code>. Ranking evaluation should also be segmented by query: mean NDCG can hide substantial differences among short lists, long lists, or traffic sources.</p>
+<h2>Native <code>Dataset</code>, <code>train()</code>, and <code>cv()</code></h2>
+<p>The sklearn wrappers are suitable for most tabular projects. Use the native API when you need to reuse binary Datasets, implement a custom objective, run native cross-validation, or control parameters more precisely.</p>
+<pre><code>import lightgbm as lgb
+
+train_data = lgb.Dataset(
+    X_train,
+    label=y_train,
+    categorical_feature=categorical_columns,
+)
+valid_data = lgb.Dataset(
+    X_valid,
+    label=y_valid,
+    categorical_feature=categorical_columns,
+    reference=train_data,
+)
+
+params = {
+    "objective": "binary",
+    "metric": ["auc", "binary_logloss"],
+    "learning_rate": 0.03,
+    "num_leaves": 31,
+    "min_data_in_leaf": 100,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 1,
+    "lambda_l2": 1.0,
+    "verbosity": -1,
+}
+
+booster = lgb.train(
+    params=params,
+    train_set=train_data,
+    num_boost_round=5_000,
+    valid_sets=[valid_data],
+    valid_names=["valid"],
+    callbacks=[
+        lgb.early_stopping(200, first_metric_only=True),
+        lgb.log_evaluation(100),
+    ],
+)
+
+valid_probability = booster.predict(
+    X_valid,
+    num_iteration=booster.best_iteration,
+)
+</code></pre>
+<p>The validation Dataset uses <code>reference=train_data</code> so that it can share the bin mapper constructed from the training set. By default, a Dataset may release its raw input after construction. Set <code>free_raw_data=False</code> only when you truly need to access the raw data or modify the Dataset later.</p>
+<p><code>lgb.cv()</code> accepts a Dataset and can receive an sklearn splitter or explicit indices through <code>folds</code>. It returns the validation mean and standard deviation at every round. Setting <code>return_cvbooster=True</code> also exposes the Booster from each fold. Time-series, entity-grouped, and ranking tasks should not rely on default randomized folds; pass folds that reflect the data-generating process.</p>
+<p>A custom objective returns a gradient and Hessian for every sample. A custom metric returns <code>(metric_name, metric_value, maximize)</code>. When a custom objective is active, predictions passed to the metric function are generally raw margins rather than probability-transformed values. Unit-test the gradients, Hessians, array shapes, and numerical stability independently before using the implementation in training.</p>
+<h2>Data input: categories, missing values, and sample weights</h2>
+<h3>Categorical features</h3>
+<p>The wrappers can automatically recognize unordered pandas <code>category</code> columns, or you can pass them explicitly through <code>categorical_feature</code>. Internally, categorical values are converted to <code>int32</code>. Category codes should preferably be contiguous and start at zero; negative values are treated as missing, and floating-point categories are truncated toward zero. Training, validation, and online inference must share the same <code>CategoricalDtype</code>, or the same integer may represent different categories.</p>
+<p>For low- to medium-cardinality categories, compare native categorical splits with one-hot encoding. High-cardinality ID columns need separate scrutiny: user IDs and product IDs can easily let the model memorize training rows, producing high random-split scores that disappear for new users or future products. <code>cat_smooth</code> and <code>min_data_per_group</code> can reduce overfitting in small categories, but they cannot repair leakage or an invalid split.</p>
+<h3>Missing values and zeros in sparse matrices</h3>
+<p>LightGBM handles missing values natively by default, so mean imputation is usually unnecessary merely to make the model train. Whether to add a missingness indicator depends on whether the fact that a value is missing carries business information.</p>
+<p>With the default <code>zero_as_missing=False</code>, NaN is missing and unstored entries in a sparse matrix are treated as zero. With <code>zero_as_missing=True</code>, both explicit zeros and unstored sparse entries are treated as missing. If zero means “zero events” or “zero amount,” enabling this option changes the feature's meaning. See the official <a href="https://lightgbm.readthedocs.io/en/stable/Advanced-Topics.html">Advanced Topics</a> documentation for the detailed rules.</p>
+<h3><code>sample_weight</code>, exposure, and sampling correction</h3>
+<p>Sample weights must be non-negative. They can represent different observation reliabilities, inverse sampling probabilities, or business costs, but they directly change each sample's contribution to the objective. If training uses <code>sample_weight</code> and validation should follow the same weighted definition, also provide <code>eval_sample_weight</code> and use the same weights in external metrics. Otherwise, the early-stopping metric and the final report measure different quantities.</p>
+<p>For ranking, <code>sample_weight</code> is still row-level, while <code>group</code> defines query boundaries; they are not substitutes. In regression, whether exposure belongs in a weight, feature, or offset depends on whether the target is an aggregate, a frequency, or a rate per unit of exposure. The interface name alone cannot make that decision.</p>
+<h2>Parameter details: which controls act on the same behavior</h2>
+<h3>Tree capacity: <code>num_leaves</code>, <code>max_depth</code>, and leaf minimums</h3>
+<p><code>num_leaves</code> is the principal capacity limit for a leaf-wise tree. Increasing it allows a tree to represent more local interactions, but also increases overfitting, model size, and inference cost. If you explicitly set <code>max_depth=d</code>, keep <code>num_leaves &lt;= 2^d</code>. Leaf-wise trees are usually unbalanced, however, so a practical leaf count is often well below this theoretical maximum.</p>
+<p><code>min_child_samples</code> limits the number of observations in a leaf. The underlying implementation uses a Hessian-based approximation, so the observed count can occasionally be slightly below the configured value. <code>min_child_weight</code> directly limits the sum of Hessians in a leaf. When classification probabilities approach 0 or 1, or when sample weights vary widely, the Hessian sum can differ substantially from the raw sample count. Inspect the two constraints separately.</p>
+<p>For a second-order objective and ignoring L1 regularization, a leaf output can be approximated as:</p>
+<p>$$
+w_{\text{leaf}}\approx-
+\frac{\sum_i g_i}{\sum_i h_i+\lambda_2}
+$$</p>
+<p>Here, $g_i$ and $h_i$ are the first and second derivatives at the current prediction, and $\lambda_2$ corresponds to <code>reg_lambda</code>. <code>min_child_weight</code> determines whether there is enough evidence to create a leaf; <code>reg_lambda</code> determines how strongly the output of an existing leaf is shrunk. They act at different points.</p>
+<p><code>min_split_gain</code> requires a split to achieve at least a specified gain. Raising it can remove weak splits and reduce training time. Its absolute scale depends on the objective and sample-weight scale, so a value should not be copied across tasks without validation.</p>
+<h3>The boosting process: learning rate, rounds, and boosting type</h3>
+<p>Tune <code>learning_rate</code> and <code>n_estimators</code> together. A smaller learning rate is useful only when the model is allowed more rounds. A common workflow sets a generous tree-count upper bound, applies the same early-stopping procedure, and compares score, best iteration, model size, and training time across learning rates.</p>
+<p><code>boosting_type="gbdt"</code> is a reliable default. <code>dart</code> randomly drops existing trees to add regularization, but its early-stopping callback is ineffective and it introduces parameters such as <code>drop_rate</code> and <code>skip_drop</code>. <code>rf</code> is random-forest mode and requires valid bagging and feature-sampling settings. Do not place boosting types and ordinary hyperparameters in one enormous search space. Establish a trustworthy GBDT baseline, then compare alternative modes separately.</p>
+<p>Current LightGBM versions select GOSS through <code>data_sample_strategy="goss"</code>. GOSS retains large-gradient samples and subsamples small-gradient samples to estimate split gains. It is not ordinary uniform row sampling, so matching its sampling fraction to bagging does not make the two procedures equivalent.</p>
+<h3>Row and feature sampling</h3>
+<p><code>subsample &lt; 1</code> takes effect only when <code>subsample_freq &gt; 0</code>. <code>subsample_freq=1</code> resamples every round, while a value of 5 resamples every five rounds. Setting only <code>subsample=0.8</code> and leaving the default <code>subsample_freq=0</code> does not enable the expected bagging.</p>
+<p><code>colsample_bytree</code> samples features once per tree. The native <code>feature_fraction_bynode</code> samples features at each node. The latter increases randomness, but the documentation notes that it does not provide the same speedup as per-tree sampling. If both are below 1, the effective candidate fraction is their product.</p>
+<p>With <code>extra_trees=True</code>, each feature checks only one random threshold at a node. This can accelerate training and increase randomness. Because it changes the split-search procedure, evaluate it in a separate ablation instead of enabling it by default alongside aggressive row and feature sampling.</p>
+<h3>Regularization: L1, L2, smoothing, and leaf-output limits</h3>
+<p><code>reg_alpha</code> applies L1 regularization to leaf outputs and is more likely to drive weak outputs to zero. <code>reg_lambda</code> applies L2 regularization and continuously shrinks large outputs. Search them on a logarithmic scale, for example from $10^{-3}$ to $10^2$, while retaining 0 as the no-regularization baseline.</p>
+<p><code>path_smooth</code> smooths child outputs toward their parent and is particularly useful for small leaves. When it is positive, <code>min_data_in_leaf</code> must be at least 2. <code>max_delta_step</code> limits the leaf output of an individual tree; the final limit is <code>learning_rate * max_delta_step</code>. When a small number of leaves produce extreme margins, this is more targeted than indiscriminately increasing global L2 regularization.</p>
+<h3>Histograms: <code>max_bin</code>, <code>min_data_in_bin</code>, and <code>subsample_for_bin</code></h3>
+<p>A larger <code>max_bin</code> gives finer candidate splits but generally increases Dataset size and split computation. The default value of 255 is not a universal accuracy requirement. For large datasets or GPU training, compare values such as 63, 127, and 255. After reducing it, reevaluate whether narrow thresholds in continuous variables remain detectable.</p>
+<p><code>min_data_in_bin</code> prevents a tiny number of observations from forming a separate bin. <code>subsample_for_bin</code> controls only how many rows construct the bin boundaries; it is not per-tree bagging. On sparse or long-tailed data, using too few rows can distort those boundaries.</p>
+<p>After a native Dataset has been created, some bin-construction state is not recomputed when ordinary training parameters change. If you tune <code>min_data_in_leaf</code> while reusing one Dataset, remember that the default <code>feature_pre_filter=True</code> may already have filtered features according to the parameter value used at first construction. The safe approach is to rebuild the Dataset for relevant trials, or disable prefiltering only after understanding the memory and speed costs.</p>
+<h3>Categorical and monotonic-constraint parameters</h3>
+<p><code>cat_smooth</code> and <code>min_data_per_group</code> reduce overfitting for small or high-cardinality categories. Parameters such as <code>max_cat_threshold</code> and <code>max_cat_to_onehot</code> control categorical split candidates and when one-vs-other splits are used. Add them to the search space only after categorical features are shown to be a bottleneck.</p>
+<p><code>monotone_constraints</code> accepts <code>1</code>, <code>-1</code>, or <code>0</code> in feature order, meaning monotonically increasing, monotonically decreasing, or unconstrained. It is appropriate for numeric features with strong domain priors and cannot be applied to categorical features. An incorrect constraint directly lowers the attainable model quality; a changed column order can attach constraints to the wrong features. Treat the constraint vector as part of the feature contract.</p>
+<h2>Validation design must match the data-generating process</h2>
+<table>
+<thead>
+<tr>
+<th>What production must generalize to</th>
+<th>Appropriate validation</th>
+<th>Typical leakage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>New samples from the same distribution</td>
+<td>Stratified random split or stratified K-fold</td>
+<td>Failing to stratify a severely imbalanced target</td>
+</tr>
+<tr>
+<td>New users, devices, or products</td>
+<td>GroupKFold or entity holdout</td>
+<td>The same entity appears in training and validation</td>
+</tr>
+<tr>
+<td>Future time windows</td>
+<td>Rolling or expanding-window split</td>
+<td>A random split exposes the past to future information</td>
+</tr>
+<tr>
+<td>Candidate ranking for new queries</td>
+<td>Query-level split</td>
+<td>One query is divided across two sets</td>
+</tr>
+</tbody>
+</table>
+<p>Target encoding, frequency statistics, aggregate features, missingness statistics, feature selection, and probability calibration must all be fitted within each training fold and then applied to its corresponding validation fold. Computing them once on the full dataset before K-fold validation merely disguises leakage as cross-validation.</p>
+<p>Early stopping is itself a model-selection step. Hyperparameter tuning, feature selection, threshold choice, and early stopping should use validation folds inside the training data; preserve the final test set for a single, approximately unbiased evaluation whenever possible. Time-based tasks must also honor real feature delays. For example, a next-day churn model cannot use aggregates that become complete only after the next day ends.</p>
+<h2>An executable tuning sequence</h2>
+<h3>Establish a baseline and a search budget</h3>
+<p>First fix the dataset version, split indices, objective, primary metric, random seeds, thread count, and time budget per trial. Record fold-level metrics, their standard deviation, best iteration, training duration, model size, and important segment results. Without this baseline, the fourth decimal place returned by a search tool has little meaning.</p>
+<p>The following capacity ranges are reasonable starting points, but they must be adjusted to the sample size:</p>
+<pre><code>capacity_space = {
+    "num_leaves": [15, 31, 63, 127],
+    "max_depth": [-1, 6, 8, 10, 12],
+    "min_child_samples": [20, 50, 100, 300, 1_000],
+    "min_child_weight": [1e-3, 1e-2, 1e-1, 1.0, 10.0],
+}
+</code></pre>
+<p>If training performance is strong but validation performance is weak, first reduce <code>num_leaves</code> and raise both leaf minimums. If both are weak, inspect the features and objective before increasing capacity. <code>max_depth</code> is more useful as an explicit latency or rule-complexity limit than as the sole source of regularization.</p>
+<h3>Tune randomization and regularization next</h3>
+<p>Search around a small number of plausible capacity settings:</p>
+<pre><code>regularization_space = {
+    "subsample": [0.6, 0.8, 1.0],
+    "subsample_freq": [1],
+    "colsample_bytree": [0.6, 0.8, 1.0],
+    "reg_alpha": [0.0, 1e-3, 1e-2, 1e-1, 1.0, 10.0],
+    "reg_lambda": [0.0, 1e-3, 1e-2, 1e-1, 1.0, 10.0],
+    "min_split_gain": [0.0, 1e-3, 1e-2, 1e-1],
+}
+</code></pre>
+<p>Regularization parameters span several orders of magnitude, so sample them logarithmically. With very few features, do not reduce <code>colsample_bytree</code> too far. With extremely rare positives, aggressive row sampling further reduces the number of positive examples available in each round. Judge every gain by stability across folds, not by the single best trial.</p>
+<h3>Jointly tune learning rate and rounds last</h3>
+<p>After fixing a promising structure, compare learning rates such as <code>0.1</code>, <code>0.05</code>, <code>0.02</code>, and <code>0.01</code>. Give each enough rounds and apply the same early-stopping rule. If the best iteration repeatedly hits the upper bound, the bound is too low. If training stops within a few dozen rounds and both training and validation performance are poor, capacity may be insufficient or the learning rate too high. A lower learning rate usually also needs more early-stopping patience.</p>
+<p>After K-fold validation, the median best iteration is a reasonable candidate for retraining on all training data. If a later independent validation window is available, continuing to use early stopping is safer. Never select the final number of rounds by looking back at the test set.</p>
+<p>When multiple trials run in parallel, limit <code>n_jobs</code> per model so that “parallel trials × model threads” does not exceed the number of physical cores. The tuning objective should not contain only an offline score either. If latency, memory, and model size are hard constraints, reject over-budget trials first, then select a stable solution among feasible models.</p>
+<h2>Diagnose problems from training behavior</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Check first</th>
+<th>Parameter-level next step</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Strong training, weak validation</td>
+<td>Leakage, entity/time split, feature drift</td>
+<td>Fewer leaves, larger leaf minimums, more sampling or regularization</td>
+</tr>
+<tr>
+<td>Both training and validation are weak</td>
+<td>Label quality, objective, missing features</td>
+<td>Increase capacity or improve features; do not start by adding regularization</td>
+</tr>
+<tr>
+<td>Best iteration varies greatly across folds</td>
+<td>Fold sizes, class rates, temporal drift</td>
+<td>Report the distribution and choose a robust round count</td>
+</tr>
+<tr>
+<td>Very early stopping with volatile metrics</td>
+<td>Learning rate, validation size, metric variance</td>
+<td>Lower the learning rate, enlarge validation data, or set <code>min_delta</code></td>
+</tr>
+<tr>
+<td>Extreme probabilities despite acceptable AUC</td>
+<td>Small leaves, class weights, distribution drift</td>
+<td>Raise leaf minimums and L2; calibrate independently</td>
+</tr>
+<tr>
+<td>Good overall ranking NDCG but poor results for long queries</td>
+<td>Query-length distribution, truncation point</td>
+<td>Evaluate by segment; tune truncation and capacity</td>
+</tr>
+<tr>
+<td>Slow training and high memory use</td>
+<td>Accidentally dense data, bin count, leaf count</td>
+<td>Reduce <code>max_bin</code> or leaves; preserve sparse input</td>
+</tr>
+<tr>
+<td>Production underperforms offline validation</td>
+<td>Feature contract, unknown categories, data delays</td>
+<td>Repair the pipeline before tuning parameters</td>
+</tr>
+</tbody>
+</table>
+<h2>Speed, memory, and reproducibility</h2>
+<p>On CPU, <code>n_jobs=-1</code> is not guaranteed to be fastest. Thread coordination can cost more than it saves on small datasets; the documentation recommends starting with the number of physical cores and benchmarking. Reducing the number of trees, leaves, candidate features, or bins all lowers computation, but each also changes model capacity and must be evaluated together with predictive quality.</p>
+<p>GPU training is better suited to large, relatively dense data. The official <a href="https://lightgbm.readthedocs.io/en/stable/GPU-Performance.html">GPU Performance Guide</a> recommends starting with a smaller <code>max_bin</code>, such as 63, and notes that single precision is usually faster. On small data, transfer and startup overhead can erase the benefit. CPU, OpenCL GPU, and CUDA backends can differ in features, speed, and numerical results. Reevaluate the model after migration instead of benchmarking training time only once.</p>
+<p>To limit memory, reduce <code>max_bin</code> and <code>num_leaves</code>, preserve sparse input, and use <code>histogram_pool_size</code> to cap the historical histogram cache. <code>force_col_wise=True</code> generally uses less Dataset memory. <code>force_row_wise=True</code> can be faster when there are many rows, relatively few total bins, or small bagging fractions, but it doubles Dataset memory use. The two options are mutually exclusive and should be chosen by benchmarking.</p>
+<p>Fixing <code>random_state</code> is still not enough for bitwise reproducibility across platforms. Record the LightGBM version, compiler, hardware, thread count, data order, and every seed. If you need more stable results on CPU within one environment, set <code>deterministic=True</code> and explicitly choose either <code>force_col_wise=True</code> or <code>force_row_wise=True</code>; training may become slower. Do not expect exact equality across versions, compilation methods, or operating systems.</p>
+<h2>Do not treat feature importance as a conclusion</h2>
+<p><code>importance_type="split"</code> counts how often a feature is used in splits. <code>"gain"</code> sums the training gain from those splits. Continuous variables with many potential thresholds, high-cardinality categories, and correlated features can all bias these importance measures.</p>
+<p>A more robust analysis combines several views: use gain and split importance for quick checks; compute permutation importance on an independent validation set; inspect per-sample contributions with <code>pred_contrib=True</code> or SHAP; and use feature ablation to confirm that key variables actually improve validation results. All of these describe how the model uses features. None establishes causality by itself.</p>
+<p>Interpretability should first serve debugging. If post-outcome timestamps, human review results, or direct proxies for the target appear at the top, investigate leakage. If the model relies heavily on missingness patterns, verify that the production missingness mechanism is stable. If a categorical ID dominates predictions, validate again under a new-entity split.</p>
+<h2>Save the feature contract with the model</h2>
+<p>In addition to the model file, save:</p>
+<ul>
+<li>feature names, order, dtypes, category vocabularies, and conventions for unknown categories and missing values;</li>
+<li>preprocessing code or a versioned feature pipeline;</li>
+<li>the label definition, training time range, split indices, and sample-weight definition;</li>
+<li>complete parameters, best iteration, dependency versions, and code revision identifier;</li>
+<li>the classification threshold, probability calibrator, and the data range used to fit them;</li>
+<li>overall and segmented metrics, model size, and end-to-end inference latency.</li>
+</ul>
+<pre><code>classifier.booster_.save_model(
+    "lightgbm-model.txt",
+    num_iteration=classifier.best_iteration_,
+)
+</code></pre>
+<p>Before deployment, compare training-side and serving-side predictions row by row on a fixed sample, and enable <code>validate_features=True</code> to check DataFrame columns. In production, monitor at least input distributions, missing rates, unknown-category rates, prediction distributions, latency, and delayed ground-truth business metrics. When performance drifts, identify changes in label definitions, feature availability, or calibration before deciding to retrain.</p>
+<h2>References</h2>
+<ul>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/Parameters.html">LightGBM Parameters</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/Parameters-Tuning.html">LightGBM Parameters Tuning</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/Python-API.html">LightGBM Python API</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMClassifier.html">LightGBM LGBMClassifier</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMRegressor.html">LightGBM LGBMRegressor</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMRanker.html">LightGBM LGBMRanker</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/Advanced-Topics.html">LightGBM Advanced Topics</a></li>
+<li><a href="https://papers.nips.cc/paper/2017/hash/6449f44a102fde848669bdd9eb6b76fa-Abstract.html">LightGBM: A Highly Efficient Gradient Boosting Decision Tree</a></li>
+</ul>
+]]></content:encoded>
+            <author>Leander Chan</author>
+        </item>
         <item>
             <title><![CDATA[Spectral Methods for Graph Diffusion: From Laplacians to Fast Solvers]]></title>
             <link>https://leanderc.com//posts/spectral-graph-diffusion/</link>

@@ -5,12 +5,700 @@
         <title>Leander's Blog</title>
         <link>https://leanderc.com//zh/</link>
         <description>Leander's Blog | Journal, Essay &amp; Research</description>
-        <lastBuildDate>Mon, 31 Aug 2026 08:03:31 GMT</lastBuildDate>
+        <lastBuildDate>Mon, 31 Aug 2026 08:49:53 GMT</lastBuildDate>
         <docs>https://validator.w3.org/feed/docs/rss2.html</docs>
         <generator>Leander's Blog with Astro and Feed for Node.js</generator>
         <language>zh</language>
         <copyright>Copyright © 2026 Leander Chan</copyright>
         <atom:link href="https://leanderc.com/zh/rss.xml" rel="self" type="application/rss+xml"/>
+        <item>
+            <title><![CDATA[LightGBM 实战指南：使用、调参与优化]]></title>
+            <link>https://leanderc.com//zh/posts/lightgbm-practical-guide/</link>
+            <guid isPermaLink="false">https://leanderc.com//zh/posts/lightgbm-practical-guide/</guid>
+            <pubDate>Mon, 31 Aug 2026 03:25:44 GMT</pubDate>
+            <description><![CDATA[从 Python 接口、分类、回归和排序任务出发，详细讲解 LightGBM 的目标函数、参数含义、验证方法、系统调参与性能优化。]]></description>
+            <content:encoded><![CDATA[<p>LightGBM 很容易跑出第一个结果，却不容易用对。实际项目中，问题通常不在 <code>fit()</code> 本身，而在四个相互关联的选择：训练接口是否用对，目标函数是否匹配任务，验证集是否模拟线上数据，以及树的容量与正则化是否协调。</p>
+<p>本文默认读者已经理解决策树、梯度提升、过拟合和交叉验证，不再从信息增益等基础概念讲起。重点是如何把 LightGBM 用于二分类、多分类、回归和 Learning-to-Rank，怎样理解常用参数的真实作用，以及如何根据训练现象定位问题。</p>
+<p>:::note[版本说明]
+文中的 API 与参数以 LightGBM 4.7 稳定文档为准。4.7 的 sklearn 包装器新增 <code>eval_X</code>、<code>eval_y</code>，并弃用 <code>eval_set=[(X_valid, y_valid)]</code>；若项目仍使用 4.6 或更早版本，请把示例中的 <code>eval_X</code>、<code>eval_y</code> 改为 <code>eval_set</code>。正式项目应固定依赖版本，不要让同一份训练代码随环境自动升级。
+:::</p>
+<h2>LightGBM 的实现特点如何影响使用</h2>
+<p>LightGBM 仍然是加法形式的梯度提升模型。第 $t$ 轮在已有预测 $F_{t-1}$ 上加入一棵新树 $f_t$，学习率 $\eta$ 控制本轮更新幅度：</p>
+<p>$$
+F_t(x)=F_{t-1}(x)+\eta f_t(x)
+$$</p>
+<p>与其他 GBDT 实现相比，LightGBM 的几个工程选择会直接反映在参数上。</p>
+<p><strong>直方图分裂</strong>：连续特征先离散到有限个 bin，节点寻找切分点时遍历 bin，而不是遍历所有原始取值。<code>max_bin</code> 控制离散粒度，<code>min_data_in_bin</code> 控制单个 bin 的最小样本量，<code>subsample_for_bin</code> 控制构造 bin 时抽取多少样本。减小 <code>max_bin</code> 通常降低时间和内存开销，但也可能丢失细粒度切分。</p>
+<p><strong>leaf-wise 生长</strong>：每次只分裂当前收益最大的叶子，而不是按层扩展整棵树。在相同叶子数下，这通常能更快降低训练损失，也容易形成很深的小样本分支。因此，<code>num_leaves</code>、<code>min_child_samples</code> 和 <code>min_child_weight</code> 往往比单独设置 <code>max_depth</code> 更关键。</p>
+<p><strong>原生类别分裂与稀疏优化</strong>：类别特征可以按类别集合切分，不必先展开成 one-hot；稀疏输入也有专门的直方图优化。类别编码、缺失值和稀疏矩阵中的零因此都有明确语义，不能只把数据转成数值后不加检查地交给模型。</p>
+<p>LightGBM 原始论文重点提出 GOSS 和 EFB；当前版本将 GOSS 作为 <code>data_sample_strategy="goss"</code>，而 <code>boosting_type</code> 用于选择 <code>gbdt</code>、<code>dart</code> 或 <code>rf</code>。这与旧版本把 <code>goss</code> 写在 <code>boosting_type</code> 中不同。算法概览可参考官方<a href="https://lightgbm.readthedocs.io/en/stable/Features.html">特性说明</a>和<a href="https://papers.nips.cc/paper/2017/hash/6449f44a102fde848669bdd9eb6b76fa-Abstract.html">原始论文</a>。</p>
+<h2>先选 Python 接口，再统一参数名称</h2>
+<p>LightGBM 的 Python 包同时提供 sklearn 风格包装器和原生训练接口。两者使用相同的底层 Booster，但数据对象、参数名和返回值不同。</p>
+<table>
+<thead>
+<tr>
+<th>使用场景</th>
+<th>推荐接口</th>
+<th>训练轮数</th>
+<th>验证数据</th>
+<th>结果对象</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>与 sklearn Pipeline、搜索器或指标体系配合</td>
+<td><code>LGBMClassifier</code>、<code>LGBMRegressor</code></td>
+<td><code>n_estimators</code></td>
+<td><code>eval_X</code>、<code>eval_y</code></td>
+<td>sklearn estimator，底层模型在 <code>booster_</code></td>
+</tr>
+<tr>
+<td>Learning-to-Rank</td>
+<td><code>LGBMRanker</code></td>
+<td><code>n_estimators</code></td>
+<td>还需 <code>group</code>、<code>eval_group</code></td>
+<td>ranker，底层模型在 <code>booster_</code></td>
+</tr>
+<tr>
+<td>直接控制 Dataset、原生交叉验证或自定义目标</td>
+<td><code>lgb.train()</code>、<code>lgb.cv()</code></td>
+<td><code>num_boost_round</code></td>
+<td><code>valid_sets</code></td>
+<td><code>Booster</code> 或 CV 结果字典</td>
+</tr>
+<tr>
+<td>Dask 分布式数据</td>
+<td><code>DaskLGBMClassifier</code> 等</td>
+<td><code>n_estimators</code></td>
+<td>依分布式接口提供</td>
+<td>Dask estimator</td>
+</tr>
+</tbody>
+</table>
+<p><code>LGBMRanker</code> 采用 sklearn 风格方法，但 sklearn 本身没有统一的排序任务协议，所以它不能像分类器和回归器那样无缝接入所有 sklearn 元估计器。官方也明确提示这一点，详见 <a href="https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMRanker.html"><code>LGBMRanker</code> API</a>。</p>
+<h3>sklearn 参数与原生参数的映射</h3>
+<p>官方文档为很多参数提供了别名。为了让日志和实验可比较，最好在同一项目中固定使用一套命名，不要在一个参数字典中混用主名称和别名。</p>
+<table>
+<thead>
+<tr>
+<th>sklearn 包装器名称</th>
+<th>原生主名称</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>n_estimators</code></td>
+<td><code>num_iterations</code></td>
+<td>boosting 轮数</td>
+</tr>
+<tr>
+<td><code>min_child_samples</code></td>
+<td><code>min_data_in_leaf</code></td>
+<td>叶子中的最小样本数近似约束</td>
+</tr>
+<tr>
+<td><code>min_child_weight</code></td>
+<td><code>min_sum_hessian_in_leaf</code></td>
+<td>叶子中的最小 Hessian 和</td>
+</tr>
+<tr>
+<td><code>subsample</code></td>
+<td><code>bagging_fraction</code></td>
+<td>每次 bagging 保留的行比例</td>
+</tr>
+<tr>
+<td><code>subsample_freq</code></td>
+<td><code>bagging_freq</code></td>
+<td>每隔多少轮重新采样；0 表示关闭</td>
+</tr>
+<tr>
+<td><code>colsample_bytree</code></td>
+<td><code>feature_fraction</code></td>
+<td>每棵树使用的特征比例</td>
+</tr>
+<tr>
+<td><code>reg_alpha</code></td>
+<td><code>lambda_l1</code></td>
+<td>叶输出的 L1 正则</td>
+</tr>
+<tr>
+<td><code>reg_lambda</code></td>
+<td><code>lambda_l2</code></td>
+<td>叶输出的 L2 正则</td>
+</tr>
+<tr>
+<td><code>min_split_gain</code></td>
+<td><code>min_gain_to_split</code></td>
+<td>允许分裂所需的最小增益</td>
+</tr>
+<tr>
+<td><code>n_jobs</code></td>
+<td><code>num_threads</code></td>
+<td>训练线程数</td>
+</tr>
+</tbody>
+</table>
+<p>参数优先级也值得注意。原生 <code>lgb.train()</code> 中，<code>params</code> 里的值可以覆盖某些函数参数；官方建议优先使用参数主名称，因为同时给主名称和别名时存在固定优先规则。完整列表见<a href="https://lightgbm.readthedocs.io/en/stable/Parameters.html">参数文档</a>。</p>
+<h3>构造器、<code>fit()</code> 与预测接口分别控制什么</h3>
+<p>sklearn 包装器的构造器负责定义模型：<code>objective</code> 决定训练损失；<code>boosting_type</code> 和树参数决定怎样建树；<code>learning_rate</code> 与 <code>n_estimators</code> 决定提升过程；采样和正则参数约束方差；<code>random_state</code>、<code>n_jobs</code>、<code>device_type</code> 决定随机性和计算后端。</p>
+<p><code>fit()</code> 接收当前数据集才有的内容：<code>X</code>、<code>y</code>、<code>sample_weight</code>、<code>categorical_feature</code>、验证数据、验证指标和 callbacks。排序任务还需要 <code>group</code> 与 <code>eval_group</code>，<code>init_model</code> 则用于从已有模型继续训练。</p>
+<p>预测阶段常用参数如下：</p>
+<ul>
+<li><code>num_iteration</code>：使用多少轮；若存在 <code>best_iteration_</code> 且未显式指定，默认会使用最佳轮数；</li>
+<li><code>raw_score=True</code>：返回变换前的 margin，而不是概率或最终预测；</li>
+<li><code>pred_leaf=True</code>：返回每棵树落入的叶节点索引；</li>
+<li><code>pred_contrib=True</code>：返回逐特征贡献，最后一列是期望值；</li>
+<li><code>validate_features=True</code>：输入是 pandas DataFrame 时，检查预测列是否与训练列匹配。</li>
+</ul>
+<p><code>objective</code> 和 <code>eval_metric</code> 不能互相替代。前者产生训练梯度和 Hessian，后者只负责衡量验证表现。模型可以用二元 log loss 训练、用 AUC 早停，但这不等于训练过程中直接优化 AUC。</p>
+<h2>分类任务：<code>LGBMClassifier</code></h2>
+<h3>二分类的目标、指标与输出</h3>
+<p>二分类使用 <code>objective="binary"</code>，标签必须是 0/1。<code>predict_proba(X)[:, 1]</code> 返回正类概率，<code>predict(X)</code> 返回类别标签；业务阈值应从概率出发单独选择，不要把默认类别结果当成成本最优决策。</p>
+<table>
+<thead>
+<tr>
+<th>需求</th>
+<th>适合的验证指标</th>
+<th>需要额外检查什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>衡量全局排序能力</td>
+<td><code>auc</code></td>
+<td>类别比例变化时 AUC 可能仍显得稳定</td>
+</tr>
+<tr>
+<td>正类稀少且关注头部</td>
+<td><code>average_precision</code> 或外部 PR AUC</td>
+<td>Precision@K、Recall@K 与容量 K</td>
+</tr>
+<tr>
+<td>概率用于定价或风险</td>
+<td><code>binary_logloss</code></td>
+<td>Brier score、校准曲线、分箱校准误差</td>
+</tr>
+<tr>
+<td>固定阈值决策</td>
+<td>外部计算 precision、recall、F1、成本</td>
+<td>阈值必须在独立验证集上确定</td>
+</tr>
+</tbody>
+</table>
+<p>下面的基线使用 AUC 早停，同时在训练结束后独立计算 log loss。</p>
+<pre><code>import lightgbm as lgb
+from sklearn.metrics import log_loss, roc_auc_score
+
+categorical_columns = ["country", "device_type", "channel"]
+for column in categorical_columns:
+    X_train[column] = X_train[column].astype("category")
+    X_valid[column] = X_valid[column].astype(X_train[column].dtype)
+
+classifier = lgb.LGBMClassifier(
+    objective="binary",
+    n_estimators=5_000,
+    learning_rate=0.03,
+    num_leaves=31,
+    min_child_samples=100,
+    subsample=0.8,
+    subsample_freq=1,
+    colsample_bytree=0.8,
+    reg_lambda=1.0,
+    random_state=42,
+    n_jobs=-1,
+    verbosity=-1,
+)
+
+classifier.fit(
+    X_train,
+    y_train,
+    eval_X=X_valid,
+    eval_y=y_valid,
+    eval_metric="auc",
+    categorical_feature=categorical_columns,
+    callbacks=[
+        lgb.early_stopping(
+            stopping_rounds=200,
+            first_metric_only=True,
+            min_delta=1e-5,
+            verbose=False,
+        ),
+        lgb.log_evaluation(period=100),
+    ],
+)
+
+valid_probability = classifier.predict_proba(
+    X_valid,
+    num_iteration=classifier.best_iteration_,
+)[:, 1]
+
+print("best iteration:", classifier.best_iteration_)
+print("AUC:", roc_auc_score(y_valid, valid_probability))
+print("log loss:", log_loss(y_valid, valid_probability))
+</code></pre>
+<p><code>n_estimators=5_000</code> 是轮数上限，不是模型一定会训练 5,000 轮。早停会把最佳轮数写入 <code>best_iteration_</code>；<code>n_iter_</code> 或 <code>n_estimators_</code> 记录实际完成的轮数。<code>min_delta</code> 用于过滤小到没有实际意义的指标波动。</p>
+<p>如果 <code>boosting_type="dart"</code>，<code>early_stopping()</code> 回调不会生效，这是官方回调接口的明确限制。使用 DART 时必须另行确定轮数，不能照搬上述训练方式。</p>
+<h3>类别不平衡时，三个“权重”不是一回事</h3>
+<p><code>scale_pos_weight</code> 只调整二分类中的正类权重，一个常见起点是 $N_{-}/N_{+}$。<code>is_unbalance=True</code> 让 LightGBM 根据类别分布处理不平衡，两者不能同时使用。<code>sample_weight</code> 是逐样本权重，可以表达曝光量、抽样概率修正或不同样本的业务成本。</p>
+<p>这些权重会改变训练损失，不等同于修改分类阈值。官方文档也提醒，类别权重可能使单样本概率估计变差。若概率本身有业务含义，需要在未参与模型拟合的校准集上重新做 Platt scaling 或 isotonic calibration。</p>
+<p><code>pos_bagging_fraction</code> 和 <code>neg_bagging_fraction</code> 可以分别抽取正负样本，但必须同时设置并启用 <code>bagging_freq</code>。启用 balanced bagging 后，普通 <code>bagging_fraction</code> 会被忽略。它改变的是每轮用于建树的样本，不是损失权重。</p>
+<h3>多分类需要关注每轮树的数量</h3>
+<p>多分类通常使用 <code>objective="multiclass"</code>，对应 softmax；<code>multiclassova</code> 则使用 One-vs-All。sklearn 包装器会根据标签推断类别数，原生接口需要设置 <code>num_class</code>。常用指标是 <code>multi_logloss</code>、<code>multi_error</code>，也可以在外部计算 macro/micro F1、每类召回率和混淆矩阵。</p>
+<pre><code>multiclassifier = lgb.LGBMClassifier(
+    objective="multiclass",
+    n_estimators=3_000,
+    learning_rate=0.04,
+    num_leaves=63,
+    min_child_samples=80,
+    class_weight="balanced",
+    random_state=42,
+    n_jobs=-1,
+)
+
+multiclassifier.fit(
+    X_train,
+    y_train,
+    eval_X=X_valid,
+    eval_y=y_valid,
+    eval_metric="multi_logloss",
+    callbacks=[lgb.early_stopping(150, first_metric_only=True)],
+)
+
+class_probability = multiclassifier.predict_proba(X_valid)
+predicted_class = multiclassifier.classes_[class_probability.argmax(axis=1)]
+</code></pre>
+<p>若有 $K$ 个类别，LightGBM 每个 boosting iteration 内部会构造 $K$ 棵树。因此，“500 轮四分类”实际包含约 2,000 棵树，训练时间、模型大小和推理延迟都会随类别数增长。多分类调优时，应同时记录 iteration 数和总树数。</p>
+<h2>回归任务：<code>LGBMRegressor</code></h2>
+<p>回归并不只有均方误差。目标函数决定模型把哪种误差看得更重，也决定预测值的统计含义。</p>
+<table>
+<thead>
+<tr>
+<th>数据与决策目标</th>
+<th><code>objective</code></th>
+<th>关键参数</th>
+<th>典型指标</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>对大误差惩罚更重、预测条件均值</td>
+<td><code>regression</code></td>
+<td>无专用参数</td>
+<td><code>rmse</code>、<code>l2</code></td>
+</tr>
+<tr>
+<td>对异常值较稳健、预测条件中位数</td>
+<td><code>regression_l1</code></td>
+<td>无专用参数</td>
+<td><code>l1</code></td>
+</tr>
+<tr>
+<td>保留二次损失的平滑性，同时降低异常值影响</td>
+<td><code>huber</code></td>
+<td><code>alpha</code></td>
+<td><code>huber</code>、MAE、RMSE</td>
+</tr>
+<tr>
+<td>预测 P10/P50/P90 等条件分位数</td>
+<td><code>quantile</code></td>
+<td><code>alpha</code> 为目标分位点</td>
+<td><code>quantile</code>、pinball loss</td>
+</tr>
+<tr>
+<td>非负计数或发生次数</td>
+<td><code>poisson</code></td>
+<td><code>poisson_max_delta_step</code></td>
+<td>Poisson deviance</td>
+</tr>
+<tr>
+<td>正值、右偏的连续响应</td>
+<td><code>gamma</code></td>
+<td>无通用形状参数</td>
+<td><code>gamma</code>、<code>gamma_deviance</code></td>
+</tr>
+<tr>
+<td>含大量零且正值右偏的总损失类响应</td>
+<td><code>tweedie</code></td>
+<td><code>tweedie_variance_power</code></td>
+<td><code>tweedie</code></td>
+</tr>
+</tbody>
+</table>
+<p>目标函数要依据标签生成过程和业务损失选择，而不是哪个离线分数看起来更高。比如，<code>regression</code> 对单个大残差非常敏感；如果标签中有真实但极端的大值，这种敏感性可能正是业务需要，不能仅以“抗异常值”为由改成 L1。</p>
+<h3>均值回归或稳健回归</h3>
+<p>下面使用 Huber 目标训练，并同时记录 MAE 与 RMSE。<code>alpha</code> 控制 Huber 目标的参数，不能与分位数任务中的 <code>alpha</code> 脱离目标函数单独解释。</p>
+<pre><code>import lightgbm as lgb
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+regressor = lgb.LGBMRegressor(
+    objective="huber",
+    alpha=0.9,
+    n_estimators=5_000,
+    learning_rate=0.03,
+    num_leaves=31,
+    min_child_samples=100,
+    reg_lambda=1.0,
+    random_state=42,
+    n_jobs=-1,
+)
+
+regressor.fit(
+    X_train,
+    y_train,
+    eval_X=X_valid,
+    eval_y=y_valid,
+    eval_metric="l1",
+    callbacks=[
+        lgb.early_stopping(200, first_metric_only=True),
+        lgb.log_evaluation(100),
+    ],
+)
+
+valid_prediction = regressor.predict(X_valid)
+print("MAE:", mean_absolute_error(y_valid, valid_prediction))
+print("RMSE:", mean_squared_error(y_valid, valid_prediction) ** 0.5)
+</code></pre>
+<p>这里明确让 <code>l1</code> 控制早停，RMSE 在训练结束后独立计算。若业务按平方误差结算，则应把早停指标改成 <code>rmse</code>。一个训练实验最好只有一个明确的早停主指标，其他指标作为诊断信息记录。</p>
+<h3>分位数回归用于预测区间</h3>
+<p>LightGBM 的 <code>quantile</code> 每次只拟合一个分位点。要得到 P10、P50、P90，需要分别训练三个模型：</p>
+<pre><code>quantile_models = {}
+quantile_predictions = {}
+
+for alpha in (0.1, 0.5, 0.9):
+    model = lgb.LGBMRegressor(
+        objective="quantile",
+        alpha=alpha,
+        n_estimators=4_000,
+        learning_rate=0.03,
+        num_leaves=31,
+        min_child_samples=100,
+        random_state=42,
+    )
+    model.fit(
+        X_train,
+        y_train,
+        eval_X=X_valid,
+        eval_y=y_valid,
+        eval_metric="quantile",
+        callbacks=[lgb.early_stopping(200)],
+    )
+    quantile_models[alpha] = model
+    quantile_predictions[alpha] = model.predict(X_valid)
+</code></pre>
+<p>分别训练不能保证任意样本都满足 $\hat q_{0.1}\leq\hat q_{0.5}\leq\hat q_{0.9}$，因此上线前必须检查 quantile crossing。预测区间也不自动等于具有严格覆盖率保证的置信区间；需要在独立数据上检查实际覆盖率，并在需要时使用 conformal calibration 等外部方法校准。</p>
+<h3>Poisson、Gamma 与 Tweedie 的选择边界</h3>
+<p>这三个目标都不是“让预测非负”的普通开关，而是对响应分布和均值—方差关系作出不同假设。Poisson 适合计数率一类问题；Gamma 适合严格为正、右偏的连续量；Tweedie 常用于零质量与正连续量并存的总损失。<code>tweedie_variance_power</code> 的范围是 $[1,2)$，接近 1 时更靠近 Poisson，接近 2 时更靠近 Gamma。</p>
+<p>在使用这些目标前，应检查标签取值域、零值比例、曝光量是否需要作为权重或 offset，以及业务真正评估的是总量、频率还是单次严重度。只因为普通回归产生少量负预测就改目标，往往会掩盖问题定义不清。</p>
+<h2>排序任务：<code>LGBMRanker</code></h2>
+<p>Learning-to-Rank 的观测单位不是彼此独立的行，而是 query 内的候选集合。搜索中一个 query 对应一次检索及其文档候选；推荐中可以对应一次请求及其候选商品。模型输出是用于 query 内排序的分数，跨 query 比较分数通常没有意义。</p>
+<h3>标签和 group 的约束</h3>
+<p><code>lambdarank</code> 与 <code>rank_xendcg</code> 都要求整数相关性标签，数值越大表示越相关。对于 <code>lambdarank</code>，默认 <code>label_gain</code> 将等级映射为 $0,1,3,7,15,\ldots$；如果业务等级的效用不符合该映射，应显式设置 <code>label_gain</code>。</p>
+<p><code>group</code> 不是逐行的 query ID，而是按当前行顺序给出的各 query 样本数。例如，三个 query 分别有 4、2、5 个候选，则 <code>group=[4, 2, 5]</code>，并且 <code>sum(group)=11</code>。数据必须先按 query 排在连续区间内。验证集同样需要自己的 <code>eval_group</code>。</p>
+<p>切分必须以 query 为单位。同一 query 的候选不能一部分进入训练集、一部分进入验证集，否则 group 结构被破坏，验证也会泄漏同一次请求的信息。</p>
+<h3>一个完整的 LambdaRank 训练模板</h3>
+<pre><code>import lightgbm as lgb
+
+train_frame = train_frame.sort_values("query_id", kind="stable")
+valid_frame = valid_frame.sort_values("query_id", kind="stable")
+
+feature_columns = [
+    column
+    for column in train_frame.columns
+    if column not in {"query_id", "relevance"}
+]
+
+X_train = train_frame[feature_columns]
+y_train = train_frame["relevance"].astype("int32")
+train_group = (
+    train_frame.groupby("query_id", sort=False)
+    .size()
+    .to_numpy()
+)
+
+X_valid = valid_frame[feature_columns]
+y_valid = valid_frame["relevance"].astype("int32")
+valid_group = (
+    valid_frame.groupby("query_id", sort=False)
+    .size()
+    .to_numpy()
+)
+
+ranker = lgb.LGBMRanker(
+    objective="lambdarank",
+    n_estimators=4_000,
+    learning_rate=0.03,
+    num_leaves=63,
+    min_child_samples=50,
+    lambdarank_truncation_level=13,
+    label_gain=[0, 1, 3, 7],
+    random_state=42,
+    n_jobs=-1,
+)
+
+ranker.fit(
+    X_train,
+    y_train,
+    group=train_group,
+    eval_X=X_valid,
+    eval_y=y_valid,
+    eval_group=[valid_group],
+    eval_metric="ndcg",
+    eval_at=[5, 10],
+    callbacks=[lgb.early_stopping(200, first_metric_only=True)],
+)
+
+valid_score = ranker.predict(X_valid)
+valid_result = valid_frame[["query_id", "relevance"]].copy()
+valid_result["score"] = valid_score
+valid_result["rank"] = (
+    valid_result.groupby("query_id")["score"]
+    .rank(method="first", ascending=False)
+)
+</code></pre>
+<p>示例主要优化 NDCG@5 和 NDCG@10。<code>lambdarank_truncation_level</code> 控制训练重点考虑多少个顶部结果，官方建议它通常略高于目标 NDCG@k，因此目标是 @10 时可从 13 一类的值开始比较，而不是无条件照抄。</p>
+<p><code>rank_xendcg</code> 是另一种排序目标。官方参数文档将其描述为速度更快、性能与 <code>lambdarank</code> 相近的选择，但这不是对所有数据集的保证；应在相同 query 切分和相同 <code>eval_at</code> 下实测。排序评估还应按 query 分析：平均 NDCG 可能掩盖短列表、长列表或不同流量来源之间的明显差异。</p>
+<h2>原生 <code>Dataset</code>、<code>train()</code> 与 <code>cv()</code></h2>
+<p>sklearn 包装器适合大多数表格项目；需要复用二进制 Dataset、自定义目标函数、原生 CV 或精确控制参数时，可以使用原生 API。</p>
+<pre><code>import lightgbm as lgb
+
+train_data = lgb.Dataset(
+    X_train,
+    label=y_train,
+    categorical_feature=categorical_columns,
+)
+valid_data = lgb.Dataset(
+    X_valid,
+    label=y_valid,
+    categorical_feature=categorical_columns,
+    reference=train_data,
+)
+
+params = {
+    "objective": "binary",
+    "metric": ["auc", "binary_logloss"],
+    "learning_rate": 0.03,
+    "num_leaves": 31,
+    "min_data_in_leaf": 100,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 1,
+    "lambda_l2": 1.0,
+    "verbosity": -1,
+}
+
+booster = lgb.train(
+    params=params,
+    train_set=train_data,
+    num_boost_round=5_000,
+    valid_sets=[valid_data],
+    valid_names=["valid"],
+    callbacks=[
+        lgb.early_stopping(200, first_metric_only=True),
+        lgb.log_evaluation(100),
+    ],
+)
+
+valid_probability = booster.predict(
+    X_valid,
+    num_iteration=booster.best_iteration,
+)
+</code></pre>
+<p>验证 Dataset 使用 <code>reference=train_data</code>，可共享训练集构造的 bin mapper。默认情况下，Dataset 构造完成后可以释放原始输入；只有之后确实还要访问原始数据或修改 Dataset 时，才需要设置 <code>free_raw_data=False</code>。</p>
+<p><code>lgb.cv()</code> 接收 Dataset，并可通过 <code>folds</code> 传入 sklearn splitter 或显式索引。它返回每轮的验证均值和标准差；设置 <code>return_cvbooster=True</code> 还能拿到各折 Booster。时间序列、实体分组和排序任务不应依赖默认随机折，必须传入符合数据生成过程的 folds。</p>
+<p>自定义目标函数需要返回每个样本的 gradient 与 Hessian；自定义指标返回 <code>(metric_name, metric_value, maximize)</code>。使用自定义目标后，传入指标函数的预测值通常是未经概率变换的 raw margin。实现前应对梯度、Hessian、数组形状和数值稳定性分别做单元测试。</p>
+<h2>数据输入：类别、缺失和样本权重</h2>
+<h3>类别特征</h3>
+<p>pandas 无序 <code>category</code> 列可以由包装器自动识别，也可以显式传给 <code>categorical_feature</code>。底层会将类别值转换为 <code>int32</code>；类别编码最好从 0 开始连续排列，负值会被当作缺失，浮点类别会向 0 截断。训练、验证和线上推理必须共享同一个 <code>CategoricalDtype</code>，否则相同整数可能表示不同类别。</p>
+<p>低到中等基数类别可以先比较原生类别分裂与 one-hot。高基数 ID 列则要单独审查：用户 ID、商品 ID 很容易使模型记忆训练样本，随机切分下的高分可能在新用户或未来商品上消失。<code>cat_smooth</code> 与 <code>min_data_per_group</code> 可以抑制小类别过拟合，但不能修复泄漏或错误切分。</p>
+<h3>缺失值与稀疏矩阵中的零</h3>
+<p>LightGBM 默认原生处理缺失值，通常无需为“模型能够训练”而做均值填充。是否添加缺失指示列取决于缺失本身有没有业务信息。</p>
+<p>默认 <code>zero_as_missing=False</code>：NaN 是缺失，稀疏矩阵未存储位置按零处理。设置 <code>zero_as_missing=True</code> 后，显式零和稀疏矩阵未存储位置都会当作缺失。如果零表示“次数为 0”或“金额为 0”，开启该参数会改变特征含义。详细规则见官方<a href="https://lightgbm.readthedocs.io/en/stable/Advanced-Topics.html">进阶主题</a>。</p>
+<h3><code>sample_weight</code>、曝光量和抽样修正</h3>
+<p>样本权重必须非负。它可以表示不同观测的可靠性、抽样概率倒数或业务成本，但会直接改变目标函数中各样本的贡献。训练集使用 <code>sample_weight</code> 时，验证集若也需要同一种加权口径，应同步传 <code>eval_sample_weight</code>，外部指标也必须使用相同权重，否则早停指标与最终报告并不一致。</p>
+<p>排序任务中的 <code>sample_weight</code> 仍是逐行权重，<code>group</code> 是 query 边界，两者不能互相替代。回归中的曝光量究竟应作为权重、特征还是 offset，取决于标签是总量、频率还是单位暴露率，不能仅靠接口名称决定。</p>
+<h2>参数详解：哪些参数控制同一件事</h2>
+<h3>树容量：<code>num_leaves</code>、<code>max_depth</code>、叶子下限</h3>
+<p><code>num_leaves</code> 是 leaf-wise 树的主要容量上限。增大它允许一棵树表达更多局部交互，也增加过拟合、模型体积和推理成本。若显式设置 <code>max_depth=d</code>，应保证 <code>num_leaves &lt;= 2^d</code>；但 leaf-wise 树通常不平衡，实践中的合理叶子数常明显小于这个理论上限。</p>
+<p><code>min_child_samples</code> 限制叶子样本数，底层根据 Hessian 近似实现，因此偶尔可能看到实际样本数略低于设定值。<code>min_child_weight</code> 则直接限制叶子 Hessian 和。在分类概率接近 0 或 1、样本权重差异大时，Hessian 和与原始样本数可能相差很大，两项约束应分别检查。</p>
+<p>对二阶目标，未考虑 L1 时，叶子输出可近似写为：</p>
+<p>$$
+w_{\text{leaf}}\approx-
+\frac{\sum_i g_i}{\sum_i h_i+\lambda_2}
+$$</p>
+<p>$g_i$ 和 $h_i$ 分别是当前预测处的一阶、二阶导数，$\lambda_2$ 对应 <code>reg_lambda</code>。<code>min_child_weight</code> 决定证据是否足以形成叶子，<code>reg_lambda</code> 决定已形成的叶子输出收缩多少；两者作用位置不同。</p>
+<p><code>min_split_gain</code> 要求分裂至少带来指定增益。提高它可以同时减少很弱的分裂和训练时间，但固定数值依赖目标函数与样本权重尺度，不适合跨任务照搬。</p>
+<h3>提升过程：学习率、轮数与 boosting 类型</h3>
+<p><code>learning_rate</code> 与 <code>n_estimators</code> 必须一起调。较小学习率只在允许更多轮数时才有意义。常见做法是把树数设为较大的上限，通过同一验证方案早停，再比较不同学习率下的分数、最佳轮数、模型大小和训练时间。</p>
+<p><code>boosting_type="gbdt"</code> 是可靠的默认起点。<code>dart</code> 会随机丢弃已有树以增加正则，但早停回调无效，且还要调 <code>drop_rate</code>、<code>skip_drop</code> 等参数。<code>rf</code> 是随机森林模式，需要满足 bagging 与特征采样条件。不要把 boosting 类型和普通超参数放进一个巨大搜索空间；先用 GBDT 建立可信基线，再单独比较替代模式。</p>
+<p>当前版本的 GOSS 由 <code>data_sample_strategy="goss"</code> 选择。它保留大梯度样本，并抽取一部分小梯度样本来估计分裂收益。GOSS 不是普通均匀行采样，不能仅凭相同采样比例与 bagging 对比。</p>
+<h3>行采样与列采样</h3>
+<p><code>subsample &lt; 1</code> 只有在 <code>subsample_freq &gt; 0</code> 时才生效。<code>subsample_freq=1</code> 表示每轮重新抽样，值为 5 表示每 5 轮重新抽样一次。只设置 <code>subsample=0.8</code> 而保留默认 <code>subsample_freq=0</code>，不会得到预期的 bagging。</p>
+<p><code>colsample_bytree</code> 每棵树抽取一次特征；原生 <code>feature_fraction_bynode</code> 则每个节点抽取特征。后者能增加随机性，但官方文档指出它不能像按树采样那样加速；两者同时小于 1 时，有效候选比例是二者乘积。</p>
+<p><code>extra_trees=True</code> 会让每个特征在一个节点只检查一个随机阈值，可以提速并增加随机性。它改变切分搜索方式，适合单独做消融，而不是默认与激进的行列采样同时开启。</p>
+<h3>正则化：L1、L2、平滑和叶输出上限</h3>
+<p><code>reg_alpha</code> 对叶输出施加 L1 正则，更容易把弱叶输出压到 0；<code>reg_lambda</code> 施加 L2 正则，连续地收缩大输出。两者通常按对数尺度搜索，例如从 $10^{-3}$ 到 $10^2$，同时保留 0 作为无正则基线。</p>
+<p><code>path_smooth</code> 将子节点输出向父节点平滑，对小叶子尤其有用；设置为正值时，<code>min_data_in_leaf</code> 至少要为 2。<code>max_delta_step</code> 限制单棵树叶输出，最终限制量是 <code>learning_rate * max_delta_step</code>。当少量叶子产生极端 margin 时，它比盲目提高全局 L2 更有针对性。</p>
+<h3>直方图：<code>max_bin</code>、<code>min_data_in_bin</code>、<code>subsample_for_bin</code></h3>
+<p><code>max_bin</code> 越大，候选切分越细，Dataset 占用和分裂计算通常越高。默认 255 并非精度必需值；大数据或 GPU 训练可比较 63、127、255。降低后要重新评估连续变量中窄阈值是否仍能被识别。</p>
+<p><code>min_data_in_bin</code> 防止非常少的样本形成独立 bin。<code>subsample_for_bin</code> 只控制构造 bin 边界时抽多少行，不是每棵树的 bagging；稀疏或分布长尾数据中，过小的取样量可能让 bin 边界失真。</p>
+<p>原生 Dataset 创建后，部分与 bin 构造相关的状态不会随普通训练参数重新计算。若调 <code>min_data_in_leaf</code> 并复用同一个 Dataset，要注意默认 <code>feature_pre_filter=True</code> 可能已依据第一次构造时的参数过滤特征。稳妥做法是为相关 trial 重建 Dataset，或在理解内存与速度代价后关闭预过滤。</p>
+<h3>类别与单调约束参数</h3>
+<p><code>cat_smooth</code> 和 <code>min_data_per_group</code> 用于抑制小类别或高基数类别的过拟合。<code>max_cat_threshold</code>、<code>max_cat_to_onehot</code> 等参数影响类别分裂候选与何时采用 one-vs-other 方式，只有在类别特征确实成为瓶颈时才值得进入搜索空间。</p>
+<p><code>monotone_constraints</code> 按特征顺序接收 <code>1</code>、<code>-1</code>、<code>0</code>，分别表示单调增加、单调减少和不约束。它适用于有明确业务先验的数值特征，不能用于类别特征。错误的约束会直接压低模型上限；输入列顺序变化则可能把约束施加到错误特征，因此约束向量必须属于特征契约的一部分。</p>
+<h2>验证设计必须匹配数据生成过程</h2>
+<table>
+<thead>
+<tr>
+<th>线上要泛化到什么</th>
+<th>合理验证方式</th>
+<th>典型泄漏</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>同分布的新样本</td>
+<td>分层随机切分或分层 K 折</td>
+<td>极不平衡却不分层</td>
+</tr>
+<tr>
+<td>新用户、新设备、新商品</td>
+<td>GroupKFold 或实体留出</td>
+<td>同一实体跨训练与验证</td>
+</tr>
+<tr>
+<td>未来时间窗口</td>
+<td>滚动或扩展窗口切分</td>
+<td>随机切分把未来信息给过去</td>
+</tr>
+<tr>
+<td>新 query 的候选排序</td>
+<td>query 级切分</td>
+<td>同一 query 被拆到两个集合</td>
+</tr>
+</tbody>
+</table>
+<p>目标编码、频次统计、聚合特征、缺失统计、特征筛选和概率校准都必须在每个训练折内部拟合，再应用到对应验证折。先对全量数据做完这些步骤再 K 折，只是把泄漏包装成了交叉验证。</p>
+<p>早停也属于模型选择。调参、选特征、定阈值和早停都应使用训练数据内部的验证折；最终测试集尽量只做一次无偏评估。时间任务还要给特征留出真实的数据延迟，例如预测次日流失时，不能使用次日结束后才完整生成的统计特征。</p>
+<h2>一套可执行的调参顺序</h2>
+<h3>先确定基线和搜索预算</h3>
+<p>先固定数据版本、切分索引、目标函数、首要指标、随机种子、线程数和单 trial 时间预算。记录每折指标、标准差、最佳轮数、训练时长、模型大小和关键分群结果。没有这些基线，搜索器返回的第四位小数没有判断价值。</p>
+<p>容量参数可以从下面的范围开始，但必须随样本量调整：</p>
+<pre><code>capacity_space = {
+    "num_leaves": [15, 31, 63, 127],
+    "max_depth": [-1, 6, 8, 10, 12],
+    "min_child_samples": [20, 50, 100, 300, 1_000],
+    "min_child_weight": [1e-3, 1e-2, 1e-1, 1.0, 10.0],
+}
+</code></pre>
+<p>若训练分数好、验证分数差，先减小 <code>num_leaves</code>，提高两个叶子下限；若训练和验证都差，再检查特征与目标函数，然后才是增大容量。<code>max_depth</code> 更适合做明确的延迟或规则复杂度限制，不应单独承担全部正则化。</p>
+<h3>再调随机化与正则</h3>
+<p>在少数合理容量附近搜索：</p>
+<pre><code>regularization_space = {
+    "subsample": [0.6, 0.8, 1.0],
+    "subsample_freq": [1],
+    "colsample_bytree": [0.6, 0.8, 1.0],
+    "reg_alpha": [0.0, 1e-3, 1e-2, 1e-1, 1.0, 10.0],
+    "reg_lambda": [0.0, 1e-3, 1e-2, 1e-1, 1.0, 10.0],
+    "min_split_gain": [0.0, 1e-3, 1e-2, 1e-1],
+}
+</code></pre>
+<p>正则参数跨多个数量级，应做对数采样。特征很少时，不要把 <code>colsample_bytree</code> 降得过低；正类极少时，激进行采样会进一步减少每轮正样本。任何收益都要看跨折稳定性，而不是只看最佳 trial。</p>
+<h3>最后联合学习率与轮数</h3>
+<p>固定较好的结构后，比较 <code>0.1</code>、<code>0.05</code>、<code>0.02</code>、<code>0.01</code> 等学习率，每档给足轮数上限，并使用相同早停规则。最优轮数总撞上限，说明上限不足；几十轮就停止且训练、验证都差，可能是容量不足或学习率过大。学习率降低时，早停耐心通常也要增加。</p>
+<p>完成 K 折后，可以用最佳轮数的中位数作为全量重训候选值。若还有时间更靠后的独立验证窗口，则继续早停更稳妥。不能根据最终测试集反向选择轮数。</p>
+<p>如果外层并行多个 trial，每个模型的 <code>n_jobs</code> 应受限，避免“trial 并行数 × 模型线程数”超过物理核心数。调参目标也不应只有离线分数；延迟、内存和模型大小是硬约束时，应先剔除超预算 trial，再在可行模型中选择稳定解。</p>
+<h2>根据训练现象定位问题</h2>
+<table>
+<thead>
+<tr>
+<th>现象</th>
+<th>先验证什么</th>
+<th>参数层面的下一步</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>训练好、验证差</td>
+<td>泄漏、实体/时间切分、特征漂移</td>
+<td>减叶子、增叶子下限、加采样或正则</td>
+</tr>
+<tr>
+<td>训练和验证都差</td>
+<td>标签质量、目标函数、缺失特征</td>
+<td>增容量或改特征，不要先堆正则</td>
+</tr>
+<tr>
+<td>各折最佳轮数差异很大</td>
+<td>各折样本量、类别率、时间漂移</td>
+<td>报告分布并采用更稳健轮数</td>
+</tr>
+<tr>
+<td>很快早停且指标剧烈波动</td>
+<td>学习率、验证集大小、指标方差</td>
+<td>降学习率、增加验证数据或 <code>min_delta</code></td>
+</tr>
+<tr>
+<td>概率极端但 AUC 尚可</td>
+<td>小叶子、类别权重、分布漂移</td>
+<td>增叶子下限和 L2，独立校准</td>
+</tr>
+<tr>
+<td>排序总体 NDCG 好、长 query 差</td>
+<td>query 长度分布、截断位置</td>
+<td>分组评估，调 truncation 与容量</td>
+</tr>
+<tr>
+<td>训练慢且内存高</td>
+<td>数据是否意外稠密、bin 与叶子数</td>
+<td>降 <code>max_bin</code>/叶子数，保留稀疏输入</td>
+</tr>
+<tr>
+<td>线上低于离线</td>
+<td>特征契约、未知类别、数据延迟</td>
+<td>修复管道后再调参</td>
+</tr>
+</tbody>
+</table>
+<h2>速度、内存与可复现性</h2>
+<p>CPU 上，<code>n_jobs=-1</code> 不保证最快。小数据的线程协调开销可能超过收益；官方建议以物理核心数为起点实测。减少树数、叶子数、候选特征或 bin 数都能降低计算量，但它们改变模型容量，必须与精度一起评估。</p>
+<p>GPU 更适合规模大、较稠密的数据。官方 <a href="https://lightgbm.readthedocs.io/en/stable/GPU-Performance.html">GPU 调优指南</a>建议从较小的 <code>max_bin</code>（例如 63）开始比较，并指出单精度通常更快。小数据可能被数据传输和启动开销抵消。CPU、OpenCL GPU 与 CUDA 后端之间的功能、速度和数值结果可能不同，迁移后要重新评估，而不是只测一次训练时间。</p>
+<p>需要限制内存时，可以降低 <code>max_bin</code> 和 <code>num_leaves</code>，保持稀疏输入，并用 <code>histogram_pool_size</code> 限制历史直方图缓存。<code>force_col_wise=True</code> 往往更节省 Dataset 内存；<code>force_row_wise=True</code> 在样本多、总 bin 较少或使用较小 bagging 时可能更快，但会使 Dataset 内存占用翻倍。两者不能同时设置，应以基准测试决定。</p>
+<p>固定 <code>random_state</code> 仍不足以跨平台逐位复现。还要记录 LightGBM 版本、编译器、硬件、线程数、数据顺序和所有 seed。CPU 上若要求同一环境下更稳定，可以设置 <code>deterministic=True</code>，并显式选择 <code>force_col_wise=True</code> 或 <code>force_row_wise=True</code>；代价可能是训练变慢。不同版本、编译方式或系统之间不应预期完全一致。</p>
+<h2>解释模型时避免把重要性当结论</h2>
+<p><code>importance_type="split"</code> 统计特征参与分裂的次数，<code>"gain"</code> 累计这些分裂的训练增益。可切分点多的连续特征、高基数类别，以及彼此相关的特征，都可能使这两类重要性产生偏差。</p>
+<p>较稳妥的分析组合是：用 gain/split 做快速检查；在独立验证集上计算 permutation importance；对单样本用 <code>pred_contrib=True</code> 或 SHAP 查看贡献；再用特征消融确认关键变量是否真的改善验证结果。所有这些结果都描述模型如何使用特征，不自动构成因果结论。</p>
+<p>解释首先应该服务于排错。若时间戳后的字段、人工审核结果或目标的直接代理变量排在最前，应先检查泄漏；若模型高度依赖缺失模式，要确认线上缺失机制是否稳定；若某个类别 ID 主导预测，要在新实体切分上重新验证。</p>
+<h2>保存模型时一并保存特征契约</h2>
+<p>模型文件之外，还需要保存：</p>
+<ul>
+<li>特征名、顺序、dtype、类别词表、未知类别和缺失值约定；</li>
+<li>预处理代码或可版本化的特征流水线；</li>
+<li>标签定义、训练时间范围、切分索引和样本权重口径；</li>
+<li>完整参数、最佳轮数、依赖版本、代码提交标识；</li>
+<li>分类阈值、概率校准器以及它们使用的数据范围；</li>
+<li>总体与分群指标、模型大小和端到端推理延迟。</li>
+</ul>
+<pre><code>classifier.booster_.save_model(
+    "lightgbm-model.txt",
+    num_iteration=classifier.best_iteration_,
+)
+</code></pre>
+<p>服务上线前，使用固定样本对训练端与服务端预测做逐条对拍，并启用 <code>validate_features=True</code> 检查 DataFrame 列。线上至少监控输入分布、缺失率、未知类别率、预测分布、延迟，以及延后才能获得的真实业务指标。模型漂移时，先定位标签口径、特征可用性或校准变化，再决定是否重训。</p>
+<h2>参考资料</h2>
+<ul>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/Parameters.html">LightGBM Parameters</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/Parameters-Tuning.html">LightGBM Parameters Tuning</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/Python-API.html">LightGBM Python API</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMClassifier.html">LightGBM LGBMClassifier</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMRegressor.html">LightGBM LGBMRegressor</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/pythonapi/lightgbm.LGBMRanker.html">LightGBM LGBMRanker</a></li>
+<li><a href="https://lightgbm.readthedocs.io/en/stable/Advanced-Topics.html">LightGBM Advanced Topics</a></li>
+<li><a href="https://papers.nips.cc/paper/2017/hash/6449f44a102fde848669bdd9eb6b76fa-Abstract.html">LightGBM: A Highly Efficient Gradient Boosting Decision Tree</a></li>
+</ul>
+]]></content:encoded>
+            <author>Leander Chan</author>
+        </item>
         <item>
             <title><![CDATA[图扩散的谱方法：从拉普拉斯算子到快速求解器]]></title>
             <link>https://leanderc.com//zh/posts/spectral-graph-diffusion/</link>
